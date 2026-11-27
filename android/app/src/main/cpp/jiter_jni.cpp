@@ -358,8 +358,8 @@ Java_com_jiter_app_bridge_NativeEngineBridge_nativeDequeuePacket(
     }
 
     const jsize cap = env->GetArrayLength(out_buf);
-    const size_t copy_len = (slot->length <= static_cast<size_t>(cap))
-        ? slot->length
+    const size_t copy_len = (slot->len <= static_cast<size_t>(cap))
+        ? slot->len
         : static_cast<size_t>(cap);
 
     if (copy_len > 0) {
