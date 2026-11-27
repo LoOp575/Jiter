@@ -11,8 +11,8 @@ android {
         applicationId = "com.jiter.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.4.0-stage3-relay"
+        versionCode = 3
+        versionName = "0.5.0-stage4-aead"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

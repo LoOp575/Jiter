@@ -15,6 +15,8 @@ object BackendConfigStore {
     private const val KEY_CONTROL_URL = "control_plane_url"
     private const val KEY_RELAY_HOST = "relay_host"
     private const val KEY_RELAY_PORT = "relay_port"
+    private const val KEY_RELAY_PSK = "relay_psk"
+    private const val KEY_TUNNEL_SCOPE = "tunnel_scope"
     private const val KEY_PROBE_HOST = "probe_host"
     private const val KEY_PROBE_PORT = "probe_port"
     private const val KEY_ROUTING_MODE = "routing_mode"
@@ -46,6 +48,8 @@ object BackendConfigStore {
             .putString(KEY_CONTROL_URL, clean.controlPlaneUrl)
             .putString(KEY_RELAY_HOST, clean.relayHost)
             .putInt(KEY_RELAY_PORT, clean.relayPort)
+            .putString(KEY_RELAY_PSK, clean.relayPsk)
+            .putString(KEY_TUNNEL_SCOPE, clean.tunnelScope.name)
             .putString(KEY_PROBE_HOST, clean.probeHost)
             .putInt(KEY_PROBE_PORT, clean.probePort)
             .putString(KEY_ROUTING_MODE, clean.routingMode.name)
@@ -68,6 +72,12 @@ object BackendConfigStore {
             relayHost = prefs.getString(KEY_RELAY_HOST, BackendConfig.DEFAULT_RELAY_HOST)
                 ?: BackendConfig.DEFAULT_RELAY_HOST,
             relayPort = prefs.getInt(KEY_RELAY_PORT, BackendConfig.DEFAULT_RELAY_PORT),
+            relayPsk = prefs.getString(KEY_RELAY_PSK, BackendConfig.DEFAULT_RELAY_PSK)
+                ?: BackendConfig.DEFAULT_RELAY_PSK,
+            tunnelScope = parseEnum(
+                prefs.getString(KEY_TUNNEL_SCOPE, null),
+                TunnelScope.DIAGNOSTIC_SUBNET,
+            ),
             probeHost = prefs.getString(KEY_PROBE_HOST, BackendConfig.DEFAULT_PROBE_HOST)
                 ?: BackendConfig.DEFAULT_PROBE_HOST,
             probePort = prefs.getInt(KEY_PROBE_PORT, BackendConfig.DEFAULT_PROBE_PORT),

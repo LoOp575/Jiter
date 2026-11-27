@@ -60,6 +60,35 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
+            android:text="@string/cfg_relay_psk_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etRelayPsk"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/cfg_relay_psk_hint"
+            android:inputType="textPassword"
+            android:singleLine="true" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/cfg_tunnel_scope_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/spinnerTunnelScope"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
             android:text="@string/cfg_probe_host_label"
             android:textColor="@color/jiter_text_secondary"
             android:textSize="12sp" />

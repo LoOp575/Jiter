@@ -39,6 +39,16 @@ object RelayProtocol {
     const val HELLO_REQ_BYTES = 8
     const val HELLO_ACK_BYTES = 12
     const val POLICY_SYNC_BYTES = 8
+    const val ENCRYPTED_HELLO_REQ_BYTES = 105
+    const val ENCRYPTED_HELLO_REQ_BODY_BEFORE_TAG = 89
+    const val ENCRYPTED_HELLO_ACK_BYTES = 113
+    const val ENCRYPTED_HELLO_ACK_BODY_BEFORE_TAG = 97
+
+    const val RELAY_CAP_XOR_FEC = 1 shl 0
+    const val RELAY_CAP_PACER_3TIER = 1 shl 1
+    const val RELAY_CAP_FORWARD_UDP = 1 shl 2
+    const val RELAY_CAP_AEAD_CHACHA20 = 1 shl 3
+    const val RELAY_CAP_TUN_NAT = 1 shl 4
 
     fun pacerRatioToQ8(ratio: Double): Int {
         if (!ratio.isFinite() || ratio <= 0.0) return 0
@@ -294,5 +304,124 @@ data class PolicySyncPayload(
         RelayProtocol.putU16(out, 4, linkMbpsX10)
         RelayProtocol.putU16(out, 6, 0)
         return out
+    }
+}
+
+class EncryptedHelloReqPayload(
+    val base: HelloReqPayload,
+    val clientPub: ByteArray,
+    val clientNonce: ByteArray,
+    val authTag: ByteArray,
+) {
+    fun pack(): ByteArray {
+        val out = ByteArray(RelayProtocol.ENCRYPTED_HELLO_REQ_BYTES)
+        System.arraycopy(base.pack(), 0, out, 0, RelayProtocol.HELLO_REQ_BYTES)
+        System.arraycopy(clientPub, 0, out, 8, RelayCrypto.P256_UNCOMPRESSED_PUB_BYTES)
+        System.arraycopy(clientNonce, 0, out, 73, RelayCrypto.HANDSHAKE_NONCE_BYTES)
+        System.arraycopy(authTag, 0, out, 89, RelayCrypto.HANDSHAKE_TAG_BYTES)
+        return out
+    }
+
+    companion object {
+        fun buildSigned(
+            base: HelloReqPayload,
+            clientPub: ByteArray,
+            clientNonce: ByteArray,
+            pskKey: ByteArray,
+            sessionId: Int,
+        ): ByteArray {
+            val out = ByteArray(RelayProtocol.ENCRYPTED_HELLO_REQ_BYTES)
+            System.arraycopy(base.pack(), 0, out, 0, RelayProtocol.HELLO_REQ_BYTES)
+            System.arraycopy(clientPub, 0, out, 8, RelayCrypto.P256_UNCOMPRESSED_PUB_BYTES)
+            System.arraycopy(clientNonce, 0, out, 73, RelayCrypto.HANDSHAKE_NONCE_BYTES)
+            val bodyBeforeTag = out.copyOf(RelayProtocol.ENCRYPTED_HELLO_REQ_BODY_BEFORE_TAG)
+            val tag = RelayCrypto.computeHelloReqTag(pskKey, sessionId, bodyBeforeTag)
+            System.arraycopy(tag, 0, out, 89, RelayCrypto.HANDSHAKE_TAG_BYTES)
+            return out
+        }
+
+        fun unpack(buf: ByteArray, offset: Int = 0, len: Int = buf.size - offset): EncryptedHelloReqPayload? {
+            if (len < RelayProtocol.ENCRYPTED_HELLO_REQ_BYTES ||
+                offset + RelayProtocol.ENCRYPTED_HELLO_REQ_BYTES > buf.size
+            ) {
+                return null
+            }
+            val base = HelloReqPayload(
+                profileId = buf[offset].toInt() and 0xFF,
+                routingMode = buf[offset + 1].toInt() and 0xFF,
+                fecPolicy = buf[offset + 2].toInt() and 0xFF,
+                mtu = RelayProtocol.getU16(buf, offset + 4),
+                linkHintMbpsX10 = RelayProtocol.getU16(buf, offset + 6),
+            )
+            return EncryptedHelloReqPayload(
+                base = base,
+                clientPub = buf.copyOfRange(offset + 8, offset + 73),
+                clientNonce = buf.copyOfRange(offset + 73, offset + 89),
+                authTag = buf.copyOfRange(offset + 89, offset + 105),
+            )
+        }
+    }
+}
+
+class EncryptedHelloAckPayload(
+    val base: HelloAckPayload,
+    val assignedIpv4: ByteArray,
+    val serverPub: ByteArray,
+    val serverNonce: ByteArray,
+    val authTag: ByteArray,
+    val bodyBeforeTag: ByteArray,
+) {
+    val assignedIpv4String: String
+        get() = "${assignedIpv4[0].toInt() and 0xFF}.${assignedIpv4[1].toInt() and 0xFF}." +
+            "${assignedIpv4[2].toInt() and 0xFF}.${assignedIpv4[3].toInt() and 0xFF}"
+
+    companion object {
+        fun buildSigned(
+            base: HelloAckPayload,
+            assignedIpv4: ByteArray,
+            serverPub: ByteArray,
+            serverNonce: ByteArray,
+            clientNonce: ByteArray,
+            pskKey: ByteArray,
+            sessionId: Int,
+        ): ByteArray {
+            val out = ByteArray(RelayProtocol.ENCRYPTED_HELLO_ACK_BYTES)
+            RelayProtocol.putU16(out, 0, base.acceptedMtu)
+            RelayProtocol.putU16(out, 2, base.relayCaps)
+            val regionBytes = base.regionTag.toByteArray(Charsets.UTF_8)
+            System.arraycopy(regionBytes, 0, out, 4, minOf(regionBytes.size, 8))
+            System.arraycopy(assignedIpv4, 0, out, 12, 4)
+            System.arraycopy(serverPub, 0, out, 16, RelayCrypto.P256_UNCOMPRESSED_PUB_BYTES)
+            System.arraycopy(serverNonce, 0, out, 81, RelayCrypto.HANDSHAKE_NONCE_BYTES)
+            val bodyBeforeTag = out.copyOf(RelayProtocol.ENCRYPTED_HELLO_ACK_BODY_BEFORE_TAG)
+            val tag = RelayCrypto.computeHelloAckTag(pskKey, sessionId, clientNonce, bodyBeforeTag)
+            System.arraycopy(tag, 0, out, 97, RelayCrypto.HANDSHAKE_TAG_BYTES)
+            return out
+        }
+
+        fun unpack(buf: ByteArray, offset: Int = 0, len: Int = buf.size - offset): EncryptedHelloAckPayload? {
+            if (len < RelayProtocol.ENCRYPTED_HELLO_ACK_BYTES ||
+                offset + RelayProtocol.ENCRYPTED_HELLO_ACK_BYTES > buf.size
+            ) {
+                return null
+            }
+            val base = HelloAckPayload.unpack(buf, offset, RelayProtocol.HELLO_ACK_BYTES) ?: return null
+            val assignedIp = buf.copyOfRange(offset + 12, offset + 16)
+            val serverPub = buf.copyOfRange(offset + 16, offset + 81)
+            val serverNonce = buf.copyOfRange(offset + 81, offset + 97)
+            val authTag = buf.copyOfRange(offset + 97, offset + 113)
+            val bodyBeforeTag = buf.copyOfRange(
+                offset,
+                offset + RelayProtocol.ENCRYPTED_HELLO_ACK_BODY_BEFORE_TAG,
+            )
+            return EncryptedHelloAckPayload(
+                base = base,
+                assignedIpv4 = assignedIp,
+                serverPub = serverPub,
+                serverNonce = serverNonce,
+                authTag = authTag,
+                bodyBeforeTag = bodyBeforeTag,
+            )
+        }
     }
 }

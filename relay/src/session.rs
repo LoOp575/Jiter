@@ -12,6 +12,7 @@ use jiter_math::controller::FecMode;
 use jiter_math::fec::{FecFrame, InterleavedXorFecDecoder, InterleavedXorFecEncoder};
 use jiter_math::scoring::TrafficProfile;
 
+use crate::crypto::SessionCipher;
 use crate::protocol::{pacer_q8_to_ratio, pacer_ratio_to_q8, TrafficTier};
 use crate::scheduler::DownstreamScheduler;
 
@@ -47,6 +48,8 @@ pub struct RelaySession {
     pub uplink_fec_decoder: InterleavedXorFecDecoder,
     pub downlink_fec_encoder: Option<InterleavedXorFecEncoder>,
     pub downstream: DownstreamScheduler,
+    pub cipher: Option<SessionCipher>,
+    pub assigned_ipv4: Option<[u8; 4]>,
 }
 
 impl RelaySession {
@@ -67,7 +70,13 @@ impl RelaySession {
             uplink_fec_decoder: InterleavedXorFecDecoder::new(128),
             downlink_fec_encoder: None,
             downstream,
+            cipher: None,
+            assigned_ipv4: None,
         }
+    }
+
+    pub fn is_encrypted(&self) -> bool {
+        self.cipher.is_some()
     }
 
     pub fn next_tx_seq(&mut self) -> u32 {
@@ -227,11 +236,17 @@ impl SessionTable {
         self.sessions.values_mut()
     }
 
-    pub fn evict_expired(&mut self, now_ms: i64) -> usize {
+    pub fn evict_expired(&mut self, now_ms: i64) -> Vec<u32> {
         let timeout = self.session_timeout_ms;
-        let before = self.sessions.len();
-        self.sessions
-            .retain(|_, sess| now_ms.saturating_sub(sess.last_seen_ms) <= timeout);
-        before - self.sessions.len()
+        let expired: Vec<u32> = self
+            .sessions
+            .iter()
+            .filter(|(_, sess)| now_ms.saturating_sub(sess.last_seen_ms) > timeout)
+            .map(|(&sid, _)| sid)
+            .collect();
+        for sid in &expired {
+            self.sessions.remove(sid);
+        }
+        expired
     }
 }
