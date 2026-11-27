@@ -11,8 +11,19 @@ android {
         applicationId = "com.jiter.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.5.0-stage4-aead"
+        versionCode = 4
+        versionName = "0.6.0-stage5-onetap"
+
+        val defaultControlUrl = (project.findProperty("jiterControlPlaneUrl") as String?)
+            ?.trim()
+            ?.replace("\"", "")
+            ?: ""
+        val defaultControlKey = (project.findProperty("jiterControlPlaneAppKey") as String?)
+            ?.trim()
+            ?.replace("\"", "")
+            ?: ""
+        buildConfigField("String", "DEFAULT_CONTROL_PLANE_URL", "\"$defaultControlUrl\"")
+        buildConfigField("String", "DEFAULT_CONTROL_PLANE_APP_KEY", "\"$defaultControlKey\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -75,4 +86,5 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
 }

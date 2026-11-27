@@ -55,10 +55,21 @@ jobs:
         working-directory: relay
         run: cargo build --release && ./target/release/jiter-relay --help
 
+  control-plane:
+    name: Stage 5 — Zero-Config Control Plane (Node.js / Vercel / Supabase)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run Control Plane unit & live HTTP bootstrap tests
+        run: npm --prefix control-plane test
+
   android-poc:
     name: Android APK — Kotlin + C++ + C + Rust (libjiter_native.so)
     runs-on: ubuntu-latest
-    needs: [ native-c-cpp, rust-math, relay-server ]
+    needs: [ native-c-cpp, rust-math, relay-server, control-plane ]
     steps:
       - uses: actions/checkout@v4
 

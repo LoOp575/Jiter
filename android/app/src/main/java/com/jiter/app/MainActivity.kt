@@ -8,6 +8,7 @@ import android.graphics.drawable.GradientDrawable
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.provider.Settings
 import android.view.LayoutInflater
 import android.view.View
@@ -15,7 +16,9 @@ import android.widget.ArrayAdapter
 import android.widget.EditText
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -25,7 +28,6 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
-import com.jiter.app.bridge.NativeEngineBridge
 import com.jiter.app.config.AppLanguage
 import com.jiter.app.config.BackendConfig
 import com.jiter.app.config.BackendConfigStore
@@ -44,43 +46,37 @@ import com.jiter.app.state.SessionStore
 import com.jiter.app.vpn.JiterVpnService
 import kotlinx.coroutines.launch
 import java.util.Locale
+import kotlin.math.roundToInt
 
+/**
+ * Stage 5 Ultra-Minimalist One-Tap GO Interface.
+ *
+ * Regular users see only the signature vertical line indicator `|`, one big GO/STOP button,
+ * and plain-language status while JITER handles server selection, AEAD encryption, and
+ * Game/Streaming packet detection automatically.
+ *
+ * Developers can tap the "JITER" title 5 times to open the Hidden Developer Console with
+ * full C/C++/Rust/AEAD telemetry and swappable Backend/Relay/Control Plane controls.
+ */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var appContextDetector: AppContextDetector
 
+    private lateinit var tvBrandTitle: TextView
     private lateinit var btnToggleLanguage: MaterialButton
     private lateinit var statusLineIndicator: View
-    private lateinit var tvSessionState: TextView
-    private lateinit var tvQualityScore: TextView
-    private lateinit var tvStatusDetail: TextView
     private lateinit var btnGoStop: MaterialButton
+    private lateinit var tvMainStatus: TextView
+    private lateinit var tvActivityBadge: TextView
+    private lateinit var tvMainSubtitle: TextView
 
-    private lateinit var tvMetricRtt: TextView
-    private lateinit var tvMetricJitter: TextView
-    private lateinit var tvMetricBloat: TextView
-    private lateinit var tvMetricLoss: TextView
-    private lateinit var tvMetricProfile: TextView
-    private lateinit var tvMetricFec: TextView
-    private lateinit var tvMetricPacer: TextView
-    private lateinit var tvMetricNetwork: TextView
-    private lateinit var tvReasons: TextView
-
-    private lateinit var chipGroupProfile: ChipGroup
-    private lateinit var chipAuto: Chip
-    private lateinit var chipGame: Chip
-    private lateinit var chipStreaming: Chip
-    private lateinit var chipDownload: Chip
-
-    private lateinit var tvEngineStack: TextView
-    private lateinit var tvBackendSummary: TextView
-    private lateinit var tvRelayTelemetry: TextView
-    private lateinit var btnBackendConfig: MaterialButton
-
-    private lateinit var tvUsageStatus: TextView
-    private lateinit var btnUsageSettings: MaterialButton
-
-    private var updatingChipsProgrammatically = false
+    // Hidden 5-tap Developer Console state
+    private var devTapCount = 0
+    private var lastDevTapMs = 0L
+    private var devConsoleDialog: AlertDialog? = null
+    private var devTelemetryView: TextView? = null
+    private var devUsageStatusView: TextView? = null
+    private var devUsageButton: MaterialButton? = null
 
     private val vpnConsentLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -116,12 +112,13 @@ class MainActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
                     SessionStore.snapshot.collect { snapshot ->
-                        renderSnapshot(snapshot)
+                        renderMainScreen(snapshot)
+                        updateDeveloperConsoleIfOpen(snapshot, BackendConfigStore.config.value)
                     }
                 }
                 launch {
                     BackendConfigStore.config.collect { cfg ->
-                        renderBackendCard(cfg, SessionStore.snapshot.value)
+                        updateDeveloperConsoleIfOpen(SessionStore.snapshot.value, cfg)
                     }
                 }
             }
@@ -130,41 +127,27 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        refreshUsageAccessStatus()
         refreshLanguageToggleLabel()
+        refreshDevUsageViews()
+    }
+
+    override fun onDestroy() {
+        devConsoleDialog?.dismiss()
+        devConsoleDialog = null
+        devTelemetryView = null
+        devUsageStatusView = null
+        devUsageButton = null
+        super.onDestroy()
     }
 
     private fun bindViews() {
+        tvBrandTitle = findViewById(R.id.tvBrandTitle)
         btnToggleLanguage = findViewById(R.id.btnToggleLanguage)
         statusLineIndicator = findViewById(R.id.statusLineIndicator)
-        tvSessionState = findViewById(R.id.tvSessionState)
-        tvQualityScore = findViewById(R.id.tvQualityScore)
-        tvStatusDetail = findViewById(R.id.tvStatusDetail)
         btnGoStop = findViewById(R.id.btnGoStop)
-
-        tvMetricRtt = findViewById(R.id.tvMetricRtt)
-        tvMetricJitter = findViewById(R.id.tvMetricJitter)
-        tvMetricBloat = findViewById(R.id.tvMetricBloat)
-        tvMetricLoss = findViewById(R.id.tvMetricLoss)
-        tvMetricProfile = findViewById(R.id.tvMetricProfile)
-        tvMetricFec = findViewById(R.id.tvMetricFec)
-        tvMetricPacer = findViewById(R.id.tvMetricPacer)
-        tvMetricNetwork = findViewById(R.id.tvMetricNetwork)
-        tvReasons = findViewById(R.id.tvReasons)
-
-        chipGroupProfile = findViewById(R.id.chipGroupProfile)
-        chipAuto = findViewById(R.id.chipAuto)
-        chipGame = findViewById(R.id.chipGame)
-        chipStreaming = findViewById(R.id.chipStreaming)
-        chipDownload = findViewById(R.id.chipDownload)
-
-        tvEngineStack = findViewById(R.id.tvEngineStack)
-        tvBackendSummary = findViewById(R.id.tvBackendSummary)
-        tvRelayTelemetry = findViewById(R.id.tvRelayTelemetry)
-        btnBackendConfig = findViewById(R.id.btnBackendConfig)
-
-        tvUsageStatus = findViewById(R.id.tvUsageStatus)
-        btnUsageSettings = findViewById(R.id.btnUsageSettings)
+        tvMainStatus = findViewById(R.id.tvMainStatus)
+        tvActivityBadge = findViewById(R.id.tvActivityBadge)
+        tvMainSubtitle = findViewById(R.id.tvMainSubtitle)
     }
 
     private fun setupListeners() {
@@ -183,27 +166,28 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        chipGroupProfile.setOnCheckedStateChangeListener { _, checkedIds ->
-            if (updatingChipsProgrammatically) return@setOnCheckedStateChangeListener
-            val overrideProfile: TrafficProfile? = when (checkedIds.firstOrNull()) {
-                R.id.chipGame -> TrafficProfile.GAME
-                R.id.chipStreaming -> TrafficProfile.STREAMING
-                R.id.chipDownload -> TrafficProfile.DOWNLOAD
-                else -> null
+        // Hidden 5-tap unlock for Developer Console & Swappable Backend Controls
+        tvBrandTitle.setOnClickListener {
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastDevTapMs > DEV_TAP_WINDOW_MS) {
+                devTapCount = 0
             }
-            sendProfileOverride(overrideProfile)
-        }
+            lastDevTapMs = now
+            devTapCount += 1
 
-        btnBackendConfig.setOnClickListener {
-            showBackendConfigDialog()
-        }
-
-        btnUsageSettings.setOnClickListener {
-            val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
-            try {
-                startActivity(intent)
-            } catch (_: Exception) {
-                startActivity(Intent(Settings.ACTION_SETTINGS))
+            val remaining = DEV_UNLOCK_TAPS - devTapCount
+            when {
+                remaining <= 0 -> {
+                    devTapCount = 0
+                    showDeveloperConsoleDialog()
+                }
+                remaining <= 2 -> {
+                    Toast.makeText(
+                        this,
+                        getString(R.string.dev_unlock_remaining_fmt, remaining),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                }
             }
         }
     }
@@ -217,12 +201,208 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun renderMainScreen(snapshot: SessionSnapshot) {
+        val active = isSessionActive(snapshot.sessionState)
+
+        val indicatorColorRes = when {
+            !active -> R.color.jiter_unknown
+            snapshot.sessionState == SessionState.STARTING ||
+                snapshot.sessionState == SessionState.CONNECTING -> R.color.jiter_accent
+            snapshot.qualityState == QualityState.GREEN -> R.color.jiter_green
+            snapshot.qualityState == QualityState.YELLOW -> R.color.jiter_yellow
+            snapshot.qualityState == QualityState.RED -> R.color.jiter_red
+            else -> R.color.jiter_accent
+        }
+        val indicatorColor = ContextCompat.getColor(this, indicatorColorRes)
+        (statusLineIndicator.background as? GradientDrawable)?.setColor(indicatorColor)
+            ?: statusLineIndicator.setBackgroundColor(indicatorColor)
+
+        if (active) {
+            btnGoStop.text = getString(R.string.action_stop)
+            btnGoStop.backgroundTintList = ColorStateList.valueOf(
+                ContextCompat.getColor(this, R.color.jiter_red),
+            )
+        } else {
+            btnGoStop.text = getString(R.string.action_go)
+            btnGoStop.backgroundTintList = ColorStateList.valueOf(
+                ContextCompat.getColor(this, R.color.jiter_green),
+            )
+        }
+
+        val displayPingMs = snapshot.relayRttMs ?: snapshot.srttMs
+        tvMainStatus.text = when (snapshot.sessionState) {
+            SessionState.STARTING, SessionState.CONNECTING ->
+                getString(R.string.main_status_connecting)
+            SessionState.ACTIVE, SessionState.RECOVERING -> {
+                if (displayPingMs != null) {
+                    getString(R.string.main_status_active_ping_fmt, displayPingMs.roundToInt())
+                } else {
+                    getString(R.string.main_status_active)
+                }
+            }
+            SessionState.DEGRADED -> getString(R.string.main_status_degraded)
+            SessionState.ERROR -> getString(R.string.main_status_error)
+            SessionState.STOPPED, SessionState.STOPPING -> getString(R.string.main_status_ready)
+        }
+
+        if (active && snapshot.sessionState != SessionState.STARTING &&
+            snapshot.sessionState != SessionState.CONNECTING
+        ) {
+            tvActivityBadge.visibility = View.VISIBLE
+            tvActivityBadge.text = when {
+                snapshot.manualProfileOverride != null -> getString(
+                    R.string.badge_mode_manual_fmt,
+                    snapshot.manualProfileOverride.displayName,
+                )
+                snapshot.activeProfile == TrafficProfile.GAME && snapshot.concurrentStreamingDetected ->
+                    getString(R.string.badge_mode_game_streaming)
+                snapshot.activeProfile == TrafficProfile.GAME ->
+                    getString(R.string.badge_mode_game)
+                snapshot.activeProfile == TrafficProfile.STREAMING ->
+                    getString(R.string.badge_mode_streaming)
+                snapshot.activeProfile == TrafficProfile.DOWNLOAD ->
+                    getString(R.string.badge_mode_download)
+                else -> getString(R.string.badge_mode_balanced)
+            }
+        } else {
+            tvActivityBadge.visibility = View.GONE
+        }
+
+        tvMainSubtitle.text = when {
+            snapshot.sessionState == SessionState.STOPPED -> {
+                if (snapshot.statusDetail == getString(R.string.status_vpn_declined)) {
+                    snapshot.statusDetail
+                } else {
+                    getString(R.string.main_subtitle_idle)
+                }
+            }
+            snapshot.sessionState == SessionState.STARTING ||
+                snapshot.sessionState == SessionState.CONNECTING ->
+                getString(R.string.main_subtitle_connecting)
+            snapshot.networkType == "Offline" ->
+                getString(R.string.main_subtitle_offline)
+            snapshot.sessionState == SessionState.DEGRADED ||
+                snapshot.qualityState == QualityState.RED ->
+                getString(R.string.main_subtitle_degraded)
+            snapshot.qualityState == QualityState.YELLOW ->
+                getString(R.string.main_subtitle_moderate)
+            snapshot.relayConnected && snapshot.relayEncrypted ->
+                getString(R.string.main_subtitle_stable_encrypted_fmt, snapshot.relayRegion ?: "EDGE")
+            else ->
+                getString(R.string.main_subtitle_stable_local)
+        }
+    }
+
+    private fun showDeveloperConsoleDialog() {
+        devConsoleDialog?.dismiss()
+        val view = LayoutInflater.from(this).inflate(R.layout.dialog_developer_console, null)
+        val tvTelemetry = view.findViewById<TextView>(R.id.tvDevTelemetry)
+        val chipGroup = view.findViewById<ChipGroup>(R.id.devChipGroupProfile)
+        val chipAuto = view.findViewById<Chip>(R.id.devChipAuto)
+        val chipGame = view.findViewById<Chip>(R.id.devChipGame)
+        val chipStreaming = view.findViewById<Chip>(R.id.devChipStreaming)
+        val chipDownload = view.findViewById<Chip>(R.id.devChipDownload)
+        val tvUsage = view.findViewById<TextView>(R.id.tvDevUsageStatus)
+        val btnBackend = view.findViewById<MaterialButton>(R.id.btnDevBackendSettings)
+        val btnUsage = view.findViewById<MaterialButton>(R.id.btnDevUsageSettings)
+
+        devTelemetryView = tvTelemetry
+        devUsageStatusView = tvUsage
+        devUsageButton = btnUsage
+
+        val snapshot = SessionStore.snapshot.value
+        when (snapshot.manualProfileOverride) {
+            TrafficProfile.GAME -> chipGame.isChecked = true
+            TrafficProfile.STREAMING -> chipStreaming.isChecked = true
+            TrafficProfile.DOWNLOAD -> chipDownload.isChecked = true
+            else -> chipAuto.isChecked = true
+        }
+
+        chipGroup.setOnCheckedStateChangeListener { _, checkedIds ->
+            val overrideProfile: TrafficProfile? = when (checkedIds.firstOrNull()) {
+                R.id.devChipGame -> TrafficProfile.GAME
+                R.id.devChipStreaming -> TrafficProfile.STREAMING
+                R.id.devChipDownload -> TrafficProfile.DOWNLOAD
+                else -> null
+            }
+            sendProfileOverride(overrideProfile)
+        }
+
+        btnBackend.setOnClickListener {
+            showBackendConfigDialog()
+        }
+
+        btnUsage.setOnClickListener {
+            val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+            try {
+                startActivity(intent)
+            } catch (_: Exception) {
+                startActivity(Intent(Settings.ACTION_SETTINGS))
+            }
+        }
+
+        refreshDevUsageViews()
+        updateDeveloperConsoleIfOpen(snapshot, BackendConfigStore.config.value)
+
+        devConsoleDialog = MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dev_console_title)
+            .setView(view)
+            .setPositiveButton(R.string.action_close, null)
+            .setOnDismissListener {
+                devTelemetryView = null
+                devUsageStatusView = null
+                devUsageButton = null
+                devConsoleDialog = null
+            }
+            .show()
+    }
+
+    private fun refreshDevUsageViews() {
+        val tvUsage = devUsageStatusView ?: return
+        val btnUsage = devUsageButton ?: return
+        if (appContextDetector.hasUsageAccess()) {
+            tvUsage.text = getString(R.string.usage_access_granted)
+            btnUsage.text = getString(R.string.usage_access_manage)
+        } else {
+            tvUsage.text = getString(R.string.usage_access_missing)
+            btnUsage.text = getString(R.string.usage_access_grant)
+        }
+    }
+
+    private fun updateDeveloperConsoleIfOpen(snapshot: SessionSnapshot, cfg: BackendConfig) {
+        val tv = devTelemetryView ?: return
+        val rtt = snapshot.srttMs?.let { String.format(Locale.US, "%.1f ms", it) } ?: "--"
+        val relayRtt = snapshot.relayRttMs?.let { String.format(Locale.US, "%.1f ms", it) } ?: "--"
+        val jitter = snapshot.jitterMs?.let { String.format(Locale.US, "%.1f ms", it) } ?: "--"
+        val bloat = snapshot.bufferbloatMs?.let { String.format(Locale.US, "+%.1f ms", it) } ?: "--"
+        val loss = snapshot.lossPct?.let { String.format(Locale.US, "%.1f%%", it) } ?: "--"
+        val qScore = snapshot.qualityScore?.let { String.format(Locale.US, "%.1f", it) } ?: "--"
+        val pacerPct = (snapshot.bgPacerRatio * 100.0).toInt()
+        val reasons = if (snapshot.reasonCodes.isEmpty()) "-" else snapshot.reasonCodes.joinToString(", ")
+
+        tv.text = buildString {
+            appendLine("Version : ${BuildConfig.VERSION_NAME} (v${BuildConfig.VERSION_CODE})")
+            appendLine("Engine  : ${snapshot.engineRuntimeLabel}")
+            appendLine("State   : ${snapshot.sessionState.label} | Q=$qScore (${snapshot.qualityState.name})")
+            appendLine("Profile : ${snapshot.activeProfile.displayName} [${snapshot.detectionSource}]${if (snapshot.concurrentStreamingDetected) " +Stream" else ""}")
+            appendLine("Latency : SRTT=$rtt | Relay=$relayRtt | Jitter=$jitter")
+            appendLine("Link    : Bloat=$bloat | Loss=$loss | Net=${snapshot.networkType}")
+            appendLine("Actuator: FEC=${snapshot.fecMode.label} | BG Pacer=$pacerPct% | Route=${snapshot.selectedRoute.label}")
+            appendLine("Tunnel  : AEAD=${snapshot.relayEncrypted} | FullTUN=${snapshot.fullInternetTunnelActive} | IP=${snapshot.assignedTunnelIp ?: "-"}")
+            appendLine("Relay   : Connected=${snapshot.relayConnected} (${snapshot.relayRegion ?: "-"}) | CP=${snapshot.controlPlaneActive}")
+            appendLine("Counters: TX=${snapshot.tunTxPackets} | RX=${snapshot.tunRxPackets} | FEC Recov=${snapshot.fecRecoveredPackets}")
+            appendLine("Config  : ${cfg.summaryLabel()}")
+            append("Reasons : $reasons")
+        }
+    }
+
     private fun showBackendConfigDialog() {
         val current = BackendConfigStore.ensureLoaded(this)
         val currentLang = LanguageManager.currentSelection()
         val view = LayoutInflater.from(this).inflate(R.layout.dialog_backend_config, null)
 
         val etControlUrl = view.findViewById<EditText>(R.id.etControlPlaneUrl)
+        val etControlAppKey = view.findViewById<EditText>(R.id.etControlPlaneAppKey)
         val etRelayHost = view.findViewById<EditText>(R.id.etRelayHost)
         val etRelayPort = view.findViewById<EditText>(R.id.etRelayPort)
         val etRelayPsk = view.findViewById<EditText>(R.id.etRelayPsk)
@@ -236,6 +416,7 @@ class MainActivity : AppCompatActivity() {
         val spLanguage = view.findViewById<Spinner>(R.id.spinnerLanguage)
 
         etControlUrl.setText(current.controlPlaneUrl)
+        etControlAppKey.setText(current.controlPlaneAppKey)
         etRelayHost.setText(current.relayHost)
         etRelayPort.setText(current.relayPort.toString())
         etRelayPsk.setText(current.relayPsk)
@@ -303,6 +484,7 @@ class MainActivity : AppCompatActivity() {
             .setPositiveButton(R.string.action_save) { _, _ ->
                 val updated = BackendConfig(
                     controlPlaneUrl = etControlUrl.text.toString(),
+                    controlPlaneAppKey = etControlAppKey.text.toString(),
                     relayHost = etRelayHost.text.toString(),
                     relayPort = etRelayPort.text.toString().toIntOrNull()
                         ?: BackendConfig.DEFAULT_RELAY_PORT,
@@ -398,161 +580,10 @@ class MainActivity : AppCompatActivity() {
                 it.copy(
                     manualProfileOverride = profile,
                     activeProfile = profile ?: TrafficProfile.SAFE_BALANCED,
+                    detectionSource = if (profile != null) "Manual" else "Standby",
                 )
             }
         }
-    }
-
-    private fun refreshUsageAccessStatus() {
-        val granted = appContextDetector.hasUsageAccess()
-        if (granted) {
-            tvUsageStatus.text = getString(R.string.usage_access_granted)
-            btnUsageSettings.text = getString(R.string.usage_access_manage)
-        } else {
-            tvUsageStatus.text = getString(R.string.usage_access_missing)
-            btnUsageSettings.text = getString(R.string.usage_access_grant)
-        }
-    }
-
-    private fun renderBackendCard(cfg: BackendConfig, snapshot: SessionSnapshot) {
-        val runtimeDisplay = if (isSessionActive(snapshot.sessionState)) {
-            snapshot.engineRuntimeLabel
-        } else {
-            detectAvailableRuntimeLabel(cfg.enginePreference)
-        }
-        tvEngineStack.text = getString(R.string.status_engine_prefix, runtimeDisplay)
-        tvBackendSummary.text = buildString {
-            append(cfg.summaryLabel())
-            append(" · ")
-            append(cfg.failurePolicy.label)
-            append(" · FEC: ")
-            append(cfg.fecPolicy.label)
-            if (cfg.controlPlaneUrl.isNotBlank()) {
-                append("\nAPI: ${cfg.controlPlaneUrl}")
-            }
-        }
-        tvRelayTelemetry.text = when {
-            snapshot.relayConnected -> {
-                val region = snapshot.relayRegion ?: "EDGE"
-                val securityBadge = when {
-                    snapshot.relayEncrypted && snapshot.fullInternetTunnelActive ->
-                        getString(R.string.relay_badge_aead_full, snapshot.assignedTunnelIp ?: "10.77.0.x")
-                    snapshot.relayEncrypted ->
-                        getString(R.string.relay_badge_aead_diag)
-                    else ->
-                        getString(R.string.relay_badge_plain)
-                }
-                val rttLabel = snapshot.relayRttMs?.let {
-                    String.format(Locale.US, "%.1f ms", it)
-                } ?: "--"
-                getString(
-                    R.string.relay_status_connected_fmt,
-                    region,
-                    securityBadge,
-                    rttLabel,
-                    snapshot.selectedRoute.label,
-                    snapshot.tunTxPackets,
-                    snapshot.tunRxPackets,
-                    snapshot.fecRecoveredPackets,
-                )
-            }
-            cfg.hasCustomRelay() -> {
-                getString(
-                    R.string.relay_status_standby_fmt,
-                    "${cfg.relayHost}:${cfg.relayPort}",
-                    snapshot.selectedRoute.label,
-                    snapshot.tunTxPackets,
-                    snapshot.tunRxPackets,
-                )
-            }
-            else -> getString(R.string.relay_status_unconfigured)
-        }
-    }
-
-    private fun detectAvailableRuntimeLabel(pref: EngineRuntimePreference): String {
-        if (pref == EngineRuntimePreference.KOTLIN_PURE) {
-            return getString(R.string.status_engine_kotlin_selected)
-        }
-        return when {
-            NativeEngineBridge.hasRustMathEngine && NativeEngineBridge.hasCPacketEngine ->
-                getString(R.string.status_engine_native_ready)
-            NativeEngineBridge.hasCPacketEngine && NativeEngineBridge.hasCppScheduler ->
-                getString(R.string.status_engine_hybrid_ready)
-            else -> getString(R.string.status_engine_fallback)
-        }
-    }
-
-    private fun renderSnapshot(snapshot: SessionSnapshot) {
-        val active = isSessionActive(snapshot.sessionState)
-
-        tvSessionState.text = snapshot.sessionState.label
-        tvStatusDetail.text = if (snapshot.sessionState == SessionState.STOPPED &&
-            snapshot.statusDetail == SessionSnapshot().statusDetail
-        ) {
-            getString(R.string.status_idle)
-        } else {
-            snapshot.statusDetail
-        }
-        tvQualityScore.text = snapshot.qualityScore?.let {
-            String.format(Locale.US, "Q %.0f", it)
-        } ?: "Q --"
-
-        val indicatorColorRes = when (snapshot.qualityState) {
-            QualityState.GREEN -> R.color.jiter_green
-            QualityState.YELLOW -> R.color.jiter_yellow
-            QualityState.RED -> R.color.jiter_red
-            QualityState.UNKNOWN -> R.color.jiter_unknown
-        }
-        val indicatorColor = ContextCompat.getColor(this, indicatorColorRes)
-        (statusLineIndicator.background as? GradientDrawable)?.setColor(indicatorColor)
-            ?: statusLineIndicator.setBackgroundColor(indicatorColor)
-
-        if (active) {
-            btnGoStop.text = getString(R.string.action_stop)
-            btnGoStop.backgroundTintList = ColorStateList.valueOf(
-                ContextCompat.getColor(this, R.color.jiter_red),
-            )
-        } else {
-            btnGoStop.text = getString(R.string.action_go)
-            btnGoStop.backgroundTintList = ColorStateList.valueOf(
-                ContextCompat.getColor(this, R.color.jiter_green),
-            )
-        }
-
-        tvMetricRtt.text = snapshot.srttMs?.let {
-            String.format(Locale.US, "%.1f ms", it)
-        } ?: "--"
-        tvMetricJitter.text = snapshot.jitterMs?.let {
-            String.format(Locale.US, "%.1f ms", it)
-        } ?: "--"
-        tvMetricBloat.text = snapshot.bufferbloatMs?.let {
-            String.format(Locale.US, "+%.1f ms", it)
-        } ?: "--"
-        tvMetricLoss.text = snapshot.lossPct?.let {
-            String.format(Locale.US, "%.1f%%", it)
-        } ?: "--"
-
-        tvMetricProfile.text = snapshot.activeProfile.displayName
-        tvMetricFec.text = snapshot.fecMode.label
-        tvMetricPacer.text = String.format(Locale.US, "%d%%", (snapshot.bgPacerRatio * 100.0).toInt())
-        tvMetricNetwork.text = snapshot.networkType
-
-        tvReasons.text = if (snapshot.reasonCodes.isEmpty()) {
-            getString(R.string.reasons_idle)
-        } else {
-            snapshot.reasonCodes.joinToString(" · ")
-        }
-
-        renderBackendCard(BackendConfigStore.config.value, snapshot)
-
-        updatingChipsProgrammatically = true
-        when (snapshot.manualProfileOverride) {
-            TrafficProfile.GAME -> chipGame.isChecked = true
-            TrafficProfile.STREAMING -> chipStreaming.isChecked = true
-            TrafficProfile.DOWNLOAD -> chipDownload.isChecked = true
-            else -> chipAuto.isChecked = true
-        }
-        updatingChipsProgrammatically = false
     }
 
     private fun isSessionActive(state: SessionState): Boolean = when (state) {
@@ -566,5 +597,10 @@ class MainActivity : AppCompatActivity() {
         SessionState.STOPPING,
         SessionState.ERROR,
         -> false
+    }
+
+    companion object {
+        private const val DEV_UNLOCK_TAPS = 5
+        private const val DEV_TAP_WINDOW_MS = 2_500L
     }
 }

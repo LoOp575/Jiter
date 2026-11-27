@@ -13,15 +13,16 @@ import com.jiter.app.MainActivity
 import com.jiter.app.R
 import com.jiter.app.engine.QualityState
 import com.jiter.app.engine.SessionSnapshot
+import com.jiter.app.engine.SessionState
 import com.jiter.app.vpn.JiterVpnService
 import java.util.Locale
+import kotlin.math.roundToInt
 
 /**
  * Persistent foreground notification & monochrome status-bar indicator.
  *
- * Android enforces monochrome tinting on status-bar smallIcon across Android 5–16,
- * so status-bar state is conveyed via distinct vertical-line vector shapes while
- * Green/Yellow/Red colors and detailed metrics appear in the expanded notification.
+ * Shows a calm, user-friendly one-line summary when collapsed (`JITER Active · Game · 14 ms`)
+ * and detailed technical metrics when expanded, plus a single-tap STOP action.
  */
 class StatusNotification(private val context: Context) {
 
@@ -77,10 +78,19 @@ class StatusNotification(private val context: Context) {
             QualityState.UNKNOWN -> R.color.jiter_unknown
         }
 
-        val scoreText = snapshot.qualityScore?.let { String.format(Locale.US, "Q:%.0f", it) } ?: "Q:--"
-        val title = "JITER · ${snapshot.sessionState.label} | ${snapshot.activeProfile.displayName} ($scoreText)"
+        val displayPingMs = snapshot.relayRttMs ?: snapshot.srttMs
+        val compactPing = displayPingMs?.let { "${it.roundToInt()} ms" } ?: "-- ms"
+        val title = when (snapshot.sessionState) {
+            SessionState.STARTING, SessionState.CONNECTING ->
+                context.getString(R.string.notif_title_connecting)
+            else -> context.getString(
+                R.string.notif_title_active_fmt,
+                snapshot.activeProfile.displayName,
+                compactPing,
+            )
+        }
 
-        val rttStr = snapshot.srttMs?.let { String.format(Locale.US, "%.1f ms", it) } ?: "--"
+        val rttStr = displayPingMs?.let { String.format(Locale.US, "%.1f ms", it) } ?: "--"
         val jitStr = snapshot.jitterMs?.let { String.format(Locale.US, "%.1f ms", it) } ?: "--"
         val lossStr = snapshot.lossPct?.let { String.format(Locale.US, "%.1f%%", it) } ?: "--"
         val bloatStr = snapshot.bufferbloatMs?.let { String.format(Locale.US, "+%.1f ms", it) } ?: "--"
