@@ -46,7 +46,10 @@
     <string name="section_backend">Backend &amp; Engine Control (Swappable)</string>
     <string name="relay_status_unconfigured">Relay: Not configured · Direct Probe mode</string>
     <string name="relay_status_standby_fmt">Relay: %1$s (Standby) · Route: %2$s · TX %3$d / RX %4$d</string>
-    <string name="relay_status_connected_fmt">Relay %1$s · %2$s · Route: %3$s\nTUN TX: %4$d · RX: %5$d · FEC Recov: %6$d</string>
+    <string name="relay_status_connected_fmt">Relay %1$s (%2$s) · %3$s · Route: %4$s\nTUN TX: %5$d · RX: %6$d · FEC Recov: %7$d</string>
+    <string name="relay_badge_aead_full">AEAD · Full TUN %1$s</string>
+    <string name="relay_badge_aead_diag">AEAD · Diag TUN</string>
+    <string name="relay_badge_plain">Plain Diag</string>
     <string name="action_configure_backend">Configure Backend / Relay</string>
     <string name="dialog_backend_title">Backend, Engine &amp; Language</string>
     <string name="action_save">Save</string>
@@ -58,6 +61,9 @@
     <string name="cfg_relay_host_label">JITER Relay Host / IP (Jakarta / Singapore VPS)</string>
     <string name="cfg_relay_host_hint">sg-relay.example.com</string>
     <string name="cfg_relay_port_label">Relay UDP Port</string>
+    <string name="cfg_relay_psk_label">Relay Pre-Shared Key (Required for AEAD + Full Tunnel)</string>
+    <string name="cfg_relay_psk_hint">Enter JITER_PSK from your VPS</string>
+    <string name="cfg_tunnel_scope_label">VPN Tunnel Scope (Apply on Next GO)</string>
     <string name="cfg_probe_host_label">Probe Endpoint Host (RTT Sensor)</string>
     <string name="cfg_probe_port_label">Probe Endpoint Port</string>
     <string name="cfg_routing_mode_label">Routing Mode</string>
@@ -71,5 +77,5 @@
     <string name="usage_access_grant">Grant Usage Access</string>
     <string name="usage_access_manage">Manage Usage Access</string>
 
-    <string name="poc_footnote">Stage 3 Polyglot + Relay: Runs C packet parser, C++ slab PacketPool/Scheduler, and Rust math FFI inside libjiter_native.so, wired to the swappable Stage 3 Rust UDP Relay Edge with two-sided BG pacing and GF(2) XOR FEC.</string>
+    <string name="poc_footnote">Stage 4 Full AEAD Tunnel: Runs C packet parser, C++ slab PacketPool/Scheduler, and Rust math FFI inside libjiter_native.so, encrypted via ECDHE P-256 + PSK + ChaCha20-Poly1305 AEAD to the JITER Linux /dev/net/tun NAT Relay Edge with Android UID app classification.</string>
 </resources>

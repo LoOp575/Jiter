@@ -1,16 +1,17 @@
 [Unit]
-Description=JITER Edge Relay Server (RAM-only, Low-Latency Pacer + XOR FEC)
+Description=JITER Stage 4 Edge Relay Gateway (ECDHE P-256 + ChaCha20-Poly1305 AEAD + Linux TUN NAT)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=jiter
-Group=jiter
-ExecStart=/usr/local/bin/jiter-relay --bind 0.0.0.0:51820 --region JKT-1 --mode echo --max-link-mbps 50
+EnvironmentFile=-/etc/jiter/relay.env
+ExecStart=/usr/local/bin/jiter-relay --bind 0.0.0.0:51820 --region JKT-1 --mode tun --tun-name jiter0 --max-link-mbps 100
 Restart=always
 RestartSec=2
 LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

@@ -86,9 +86,18 @@ class StatusNotification(private val context: Context) {
         val bloatStr = snapshot.bufferbloatMs?.let { String.format(Locale.US, "+%.1f ms", it) } ?: "--"
         val pacerPct = (snapshot.bgPacerRatio * 100.0).toInt()
 
+        val routeDesc = buildString {
+            append(snapshot.selectedRoute.label)
+            if (snapshot.relayEncrypted) {
+                append(" [AEAD]")
+            }
+            if (snapshot.fullInternetTunnelActive) {
+                append(" [Full TUN]")
+            }
+        }
         val summary = context.getString(R.string.notif_summary_fmt, rttStr, jitStr, lossStr)
         val line2 = context.getString(R.string.notif_detail_line2_fmt, bloatStr, snapshot.fecMode.label, pacerPct)
-        val line3 = context.getString(R.string.notif_detail_line3_fmt, snapshot.networkType, snapshot.selectedRoute.label)
+        val line3 = context.getString(R.string.notif_detail_line3_fmt, snapshot.networkType, routeDesc)
         val expanded = "$summary\n$line2\n$line3"
 
         return NotificationCompat.Builder(context, CHANNEL_ID)

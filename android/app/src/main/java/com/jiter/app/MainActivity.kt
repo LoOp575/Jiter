@@ -34,6 +34,7 @@ import com.jiter.app.config.FailurePolicy
 import com.jiter.app.config.FecPolicy
 import com.jiter.app.config.LanguageManager
 import com.jiter.app.config.RoutingMode
+import com.jiter.app.config.TunnelScope
 import com.jiter.app.context.AppContextDetector
 import com.jiter.app.engine.QualityState
 import com.jiter.app.engine.SessionSnapshot
@@ -224,6 +225,8 @@ class MainActivity : AppCompatActivity() {
         val etControlUrl = view.findViewById<EditText>(R.id.etControlPlaneUrl)
         val etRelayHost = view.findViewById<EditText>(R.id.etRelayHost)
         val etRelayPort = view.findViewById<EditText>(R.id.etRelayPort)
+        val etRelayPsk = view.findViewById<EditText>(R.id.etRelayPsk)
+        val spTunnelScope = view.findViewById<Spinner>(R.id.spinnerTunnelScope)
         val etProbeHost = view.findViewById<EditText>(R.id.etProbeHost)
         val etProbePort = view.findViewById<EditText>(R.id.etProbePort)
         val spRouting = view.findViewById<Spinner>(R.id.spinnerRoutingMode)
@@ -235,8 +238,17 @@ class MainActivity : AppCompatActivity() {
         etControlUrl.setText(current.controlPlaneUrl)
         etRelayHost.setText(current.relayHost)
         etRelayPort.setText(current.relayPort.toString())
+        etRelayPsk.setText(current.relayPsk)
         etProbeHost.setText(current.probeHost)
         etProbePort.setText(current.probePort.toString())
+
+        val scopeItems = TunnelScope.entries
+        spTunnelScope.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            scopeItems.map { it.label },
+        )
+        spTunnelScope.setSelection(scopeItems.indexOf(current.tunnelScope).coerceAtLeast(0))
 
         val routingItems = RoutingMode.entries
         spRouting.adapter = ArrayAdapter(
@@ -294,6 +306,8 @@ class MainActivity : AppCompatActivity() {
                     relayHost = etRelayHost.text.toString(),
                     relayPort = etRelayPort.text.toString().toIntOrNull()
                         ?: BackendConfig.DEFAULT_RELAY_PORT,
+                    relayPsk = etRelayPsk.text.toString(),
+                    tunnelScope = scopeItems[spTunnelScope.selectedItemPosition],
                     probeHost = etProbeHost.text.toString(),
                     probePort = etProbePort.text.toString().toIntOrNull()
                         ?: BackendConfig.DEFAULT_PROBE_PORT,
@@ -420,12 +434,21 @@ class MainActivity : AppCompatActivity() {
         tvRelayTelemetry.text = when {
             snapshot.relayConnected -> {
                 val region = snapshot.relayRegion ?: "EDGE"
+                val securityBadge = when {
+                    snapshot.relayEncrypted && snapshot.fullInternetTunnelActive ->
+                        getString(R.string.relay_badge_aead_full, snapshot.assignedTunnelIp ?: "10.77.0.x")
+                    snapshot.relayEncrypted ->
+                        getString(R.string.relay_badge_aead_diag)
+                    else ->
+                        getString(R.string.relay_badge_plain)
+                }
                 val rttLabel = snapshot.relayRttMs?.let {
                     String.format(Locale.US, "%.1f ms", it)
                 } ?: "--"
                 getString(
                     R.string.relay_status_connected_fmt,
                     region,
+                    securityBadge,
                     rttLabel,
                     snapshot.selectedRoute.label,
                     snapshot.tunTxPackets,

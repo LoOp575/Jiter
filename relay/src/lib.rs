@@ -1,9 +1,14 @@
-//! JITER Stage 3 Edge Relay library (`jiter-relay`).
+//! JITER Stage 4 Edge Relay library (`jiter-relay`).
 //!
-//! Coordinates two-sided anti-bufferbloat pacing, strict 3-tier downstream scheduling,
-//! and GF(2) XOR Parity FEC recovery with the JITER Android client.
+//! Coordinates:
+//!   - ECDHE P-256 + PSK mutual auth + HKDF-SHA256 + ChaCha20-Poly1305 AEAD (`crypto`)
+//!   - Linux `/dev/net/tun` NAT Gateway & ephemeral IPv4 pool (`tun`)
+//!   - Two-sided anti-bufferbloat 3-tier strict-priority pacing (`scheduler`)
+//!   - GF(2) XOR Parity FEC recovery (`session`, via `jiter-math`)
 
+pub mod crypto;
 pub mod protocol;
 pub mod scheduler;
 pub mod server;
 pub mod session;
+pub mod tun;

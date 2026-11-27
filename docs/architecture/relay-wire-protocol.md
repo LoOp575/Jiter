@@ -1,10 +1,10 @@
-# JITER Relay Wire Protocol v1 (`JT`)
+# JITER Relay Wire Protocol v1 (`JT`) — Stage 4 Encrypted Spec
 
-This document locks the binary UDP wire contract shared identically across:
+This document locks the binary UDP wire contract & AEAD transport security shared identically across:
 
 - **C11 Packet Engine** (`engine-native/c/include/jiter_packet.h`, `jiter_packet.c`)
-- **Rust JITER Relay Edge** (`relay/src/protocol.rs`)
-- **Android Client** (`android/app/src/main/java/com/jiter/app/relay/RelayProtocol.kt`)
+- **Rust JITER Relay Edge** (`relay/src/protocol.rs`, `relay/src/crypto.rs`, `relay/src/tun.rs`)
+- **Android Client** (`android/app/src/main/java/com/jiter/app/relay/{RelayProtocol,RelayCrypto,RelayTunnelClient}.kt`)
 
 ---
 
@@ -22,60 +22,67 @@ This document locks the binary UDP wire contract shared identically across:
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |       payload_len (u16)       |  pacer_q8 (u8)| fec_mode (u8) |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    payload (payload_len bytes)                |
+|            payload / AEAD ciphertext + 16B Poly1305 tag       |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
-
-### Field Definitions
-
-| Offset | Size | Field | Meaning |
-|---:|---:|---|---|
-| `0..1` | 2 B | `magic` | ASCII `'J'` (`0x4A`), `'T'` (`0x54`) |
-| `2` | 1 B | `ver_type` | High 4 bits = version (`1`), Low 4 bits = `msg_type` (`1..8`) |
-| `3` | 1 B | `tier_flags` | High 2 bits = `traffic_tier` (`0=GAME, 1=STREAMING, 2=BACKGROUND`), Low 6 bits = `flags` |
-| `4..7` | 4 B | `session_id` | Ephemeral random per-GO session ID (never linked to user account; wiped on `GOODBYE`) |
-| `8..11` | 4 B | `sequence` | Monotonic per-session frame sequence number (used for loss estimation) |
-| `12..13` | 2 B | `payload_len` | Payload byte length (`0..1440`) |
-| `14` | 1 B | `pacer_q8` | Quantized `bg_pacer_ratio` (`round(clamp(ratio, 0.0, 1.0) * 255)`) |
-| `15` | 1 B | `fec_mode` | `0=OFF`, `1=XOR_K4`, `2=XOR_K2`, `3=DUPLICATE` |
-
-### Message Types (`msg_type`)
-
-| Value | Name | Direction | Payload Layout |
-|---:|---|---|---|
-| `1` | `PROBE_REQ` | Client → Relay | `client_tx_us: u64` (8B) + `profile_id: u16` (2B) + `reserved: u16` (2B) = **12 bytes** |
-| `2` | `PROBE_RESP` | Relay → Client | `echo_tx_us: u64` (8B) + `relay_rx_loss_bps: u32` (4B, loss% × 100) + `relay_queue_us: u32` (4B) + `relay_fec_recovered: u32` (4B) + `relay_pacer_q8: u16` (2B) + `relay_fec_mode: u16` (2B) = **24 bytes** |
-| `3` | `HELLO_REQ` | Client → Relay | `profile_id: u8` + `routing_mode: u8` + `fec_policy: u8` + `reserved: u8` + `mtu: u16` + `link_hint_mbps_x10: u16` = **8 bytes** |
-| `4` | `HELLO_ACK` | Relay → Client | `accepted_mtu: u16` + `relay_caps: u16` + `region_tag: [u8; 8]` (UTF-8 zero-padded, e.g. `"JKT-1\0\0\0"`) = **12 bytes** |
-| `5` | `DATA_PLAIN` | Bidirectional | Raw IPv4 packet bytes (max 1440 bytes) |
-| `6` | `DATA_FEC` | Bidirectional | 8-byte `JiterFecHeader` (Formula #3) + FEC data or XOR parity bytes |
-| `7` | `POLICY_SYNC` | Client → Relay | `profile_id: u8` + `fec_mode: u8` + `pacer_q8: u8` + `reserved: u8` + `link_mbps_x10: u16` + `reserved2: u16` = **8 bytes** |
-| `8` | `CONTROL` | Bidirectional | 0 bytes; `flags & 0x01` (`FLAG_GOODBYE`) triggers immediate RAM wipe of session state |
 
 ### Header Flags (`tier_flags & 0x3F`)
 - `0x01`: `FLAG_GOODBYE` — Clean session teardown & RAM wipe
 - `0x02`: `FLAG_FEC_PARITY` — Fast-path hint indicating `DATA_FEC` payload carries a parity frame
-- `0x04`: `FLAG_ENCRYPTED` — Reserved for Stage 4 Noise_IK / WireGuard outer AEAD transport wrapper
+- `0x04`: `FLAG_ENCRYPTED` — Stage 4 ECDHE P-256 handshake / ChaCha20-Poly1305 AEAD encrypted payload
+
+### Relay Capability Bitmask (`HelloAckPayload.relay_caps`)
+- `1 << 0`: `RELAY_CAP_XOR_FEC` — GF(2) Interleaved XOR Parity FEC
+- `1 << 1`: `RELAY_CAP_PACER_3TIER` — Downstream 3-tier Strict Priority + Anti-Bufferbloat Pacer
+- `1 << 2`: `RELAY_CAP_FORWARD_UDP` — Upstream single-target UDP forwarding (`--mode forward`)
+- `1 << 3`: `RELAY_CAP_AEAD_CHACHA20` — Stage 4 ECDHE P-256 + HKDF-SHA256 + ChaCha20-Poly1305 AEAD
+- `1 << 4`: `RELAY_CAP_TUN_NAT` — Stage 4 Linux `/dev/net/tun` full-internet NAT gateway (`--mode tun`)
 
 ---
 
-## 2. Golden Interoperability Test Vector
+## 2. Stage 4 Standard Transport Security (ECDHE P-256 + PSK + ChaCha20-Poly1305)
 
-Verified identically in C (`test_native_engine.cpp`), Rust (`relay/tests/integration_relay.rs`), and Kotlin (`JiterEngineTest.kt`):
+Uses **zero custom cryptography** — strictly standard audited primitives:
+- **Rust Relay (`relay/`)**: RustCrypto `p256` (ECDH), `hkdf` + `sha2` + `hmac`, `chacha20poly1305` (RFC 8439), `subtle` constant-time MAC compare.
+- **Android Client (`android/`)**: Built-in JCA/Conscrypt `EC` (`secp256r1` ECDH), `HmacSHA256` (RFC 5869 HKDF), `ChaCha20-Poly1305` (RFC 8439), `MessageDigest.isEqual` (available natively on Android API 29–35 and JDK 17 with zero APK bloat).
+
+### Key Derivation
+1. `psk_key (32B) = SHA-256("jiter-psk-v1:" || trim(psk_string))`
+2. **Encrypted `HELLO_REQ` (`msg_type = 3`, `flags = FLAG_ENCRYPTED`, 105 bytes):**
+   - `0..8`: Base `HelloReqPayload` (8B)
+   - `8..73`: `client_ephem_pub` — 65B uncompressed SEC1 P-256 public key (`0x04 || X(32) || Y(32)`)
+   - `73..89`: `client_nonce` — 16B CSPRNG random bytes
+   - `89..105`: `client_auth_tag` — first 16B of `HMAC-SHA256(psk_key, "jiter-hello-req-v1" || session_id_be4 || payload[0..89])`
+3. **Encrypted `HELLO_ACK` (`msg_type = 4`, `flags = FLAG_ENCRYPTED`, 113 bytes):**
+   - `0..12`: Base `HelloAckPayload` (12B: `accepted_mtu`, `relay_caps`, `region_tag[8]`)
+   - `12..16`: `assigned_ipv4` (4B, e.g., `10.77.0.2` allocated from relay RAM pool)
+   - `16..81`: `server_ephem_pub` — 65B uncompressed SEC1 P-256 public key (`0x04 || X(32) || Y(32)`)
+   - `81..97`: `server_nonce` — 16B CSPRNG random bytes
+   - `97..113`: `server_auth_tag` — first 16B of `HMAC-SHA256(psk_key, "jiter-hello-ack-v1" || session_id_be4 || client_nonce(16) || payload[0..97])`
+4. **Forward-Secret Directional Keys (RFC 5869 HKDF-SHA256):**
+   - `ecdh_shared (32B)` = raw X-coordinate from ECDH(`secp256r1`)
+   - `ikm (64B) = ecdh_shared || psk_key`
+   - `salt (36B) = client_nonce(16) || server_nonce(16) || session_id_be4(4)`
+   - `c2s_key (32B) = HKDF-Expand(PRK, "jiter-v1-c2s-key", 32)`
+   - `s2c_key (32B) = HKDF-Expand(PRK, "jiter-v1-s2c-key", 32)`
+   - `c2s_iv  (4B)  = HKDF-Expand(PRK, "jiter-v1-c2s-iv", 4)`
+   - `s2c_iv  (4B)  = HKDF-Expand(PRK, "jiter-v1-s2c-iv", 4)`
+
+### Per-Packet AEAD Framing & Anti-Replay
+- **Nonce (12B):** `dir_iv(4B) || session_id_be4(4B) || sequence_be4(4B)` (zero extra wire bytes; monotonic `sequence` guarantees uniqueness).
+- **AAD (16B):** Exact packed 16-byte `WireHeader` (`payload_len` includes the 16-byte Poly1305 tag).
+- **Anti-Replay:** 64-packet sliding bitmap window checked before decryption and updated **only after** Poly1305 tag verification succeeds.
+- When the relay runs with `--psk` or `--mode tun`, unauthenticated/unencrypted packets are strictly dropped.
+
+---
+
+## 3. Golden Interoperability Test Vector (16-Byte Header)
 
 - `version = 1`, `msg_type = 6 (DATA_FEC)`, `tier = 0 (GAME)`, `flags = 0x02 (FLAG_FEC_PARITY)`
-- `session_id = 0x11223344`, `sequence = 0x0000002A (42)`, `payload_len = 128 (0x0080)`
-- `pacer_q8 = 89 (~0.35)`, `fec_mode = 2 (XOR_K2)`
+- `session_id = 0x11223344`, `sequence = 42`, `payload_len = 128`, `pacer_q8 = 89`, `fec_mode = 2`
 
-Exact 16 wire bytes (hex):
 ```text
 4A 54 16 02 11 22 33 44 00 00 00 2A 00 80 59 02
 ```
 
----
-
-## 3. Privacy & Zero-Retention Guarantee
-
-- `session_id` is randomly generated in RAM when the user taps **GO** and destroyed on **STOP**.
-- The Relay stores active sessions strictly in an in-memory `HashMap` with idle TTL expiration (default 60s) and immediate deletion upon receiving `FLAG_GOODBYE`.
-- No user accounts, no IP-to-history database, and no disk packet logs are written.
+Cryptographic interoperability is additionally locked across Rust and Kotlin via official **IETF RFC 5869 (HKDF-SHA256)**, **IETF RFC 8439 (ChaCha20-Poly1305)**, and **SEC1 P-256 Generator `G`** golden vectors.

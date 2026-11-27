@@ -46,7 +46,10 @@
     <string name="section_backend">Kontrol Backend &amp; Mesin (Bisa Diganti)</string>
     <string name="relay_status_unconfigured">Relay: Belum diatur · Mode Probe Langsung</string>
     <string name="relay_status_standby_fmt">Relay: %1$s (Siaga) · Rute: %2$s · TX %3$d / RX %4$d</string>
-    <string name="relay_status_connected_fmt">Relay %1$s · %2$s · Rute: %3$s\nTUN TX: %4$d · RX: %5$d · FEC Pulih: %6$d</string>
+    <string name="relay_status_connected_fmt">Relay %1$s (%2$s) · %3$s · Rute: %4$s\nTUN TX: %5$d · RX: %6$d · FEC Pulih: %7$d</string>
+    <string name="relay_badge_aead_full">AEAD · Full TUN %1$s</string>
+    <string name="relay_badge_aead_diag">AEAD · Diag TUN</string>
+    <string name="relay_badge_plain">Diag Polos</string>
     <string name="action_configure_backend">Atur Backend / Relay / Bahasa</string>
     <string name="dialog_backend_title">Pengaturan Backend, Mesin &amp; Bahasa</string>
     <string name="action_save">Simpan</string>
@@ -58,6 +61,9 @@
     <string name="cfg_relay_host_label">Host / IP Relay JITER (VPS Jakarta / Singapura)</string>
     <string name="cfg_relay_host_hint">sg-relay.example.com</string>
     <string name="cfg_relay_port_label">Port UDP Relay</string>
+    <string name="cfg_relay_psk_label">Pre-Shared Key Relay (Wajib untuk AEAD + Full Tunnel)</string>
+    <string name="cfg_relay_psk_hint">Masukkan JITER_PSK dari VPS kamu</string>
+    <string name="cfg_tunnel_scope_label">Cakupan Tunnel VPN (Berlaku saat GO berikutnya)</string>
     <string name="cfg_probe_host_label">Host Probe Endpoint (Sensor RTT)</string>
     <string name="cfg_probe_port_label">Port Probe Endpoint</string>
     <string name="cfg_routing_mode_label">Mode Routing</string>
@@ -71,5 +77,5 @@
     <string name="usage_access_grant">Beri Izin Akses Penggunaan</string>
     <string name="usage_access_manage">Kelola Akses Penggunaan</string>
 
-    <string name="poc_footnote">Stage 3 Polyglot + Relay: Menjalankan C packet parser, C++ slab PacketPool/Scheduler, dan Rust math FFI dalam libjiter_native.so, terhubung ke JITER UDP Relay Edge (Rust) yang bisa diganti dengan pacer dua arah dan GF(2) XOR FEC.</string>
+    <string name="poc_footnote">Stage 4 Full AEAD Tunnel: Menjalankan C packet parser, C++ slab PacketPool/Scheduler, dan Rust math FFI dalam libjiter_native.so, terenkripsi via ECDHE P-256 + PSK + ChaCha20-Poly1305 AEAD ke JITER Linux /dev/net/tun NAT Relay Edge dengan klasifikasi UID aplikasi Android.</string>
 </resources>

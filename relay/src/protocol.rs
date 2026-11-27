@@ -17,6 +17,8 @@ pub const FLAG_ENCRYPTED: u8 = 0x04;
 pub const RELAY_CAP_XOR_FEC: u16 = 1 << 0;
 pub const RELAY_CAP_PACER_3TIER: u16 = 1 << 1;
 pub const RELAY_CAP_FORWARD_UDP: u16 = 1 << 2;
+pub const RELAY_CAP_AEAD_CHACHA20: u16 = 1 << 3;
+pub const RELAY_CAP_TUN_NAT: u16 = 1 << 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -361,6 +363,104 @@ impl PolicySyncPayload {
             reserved: buf[3],
             link_mbps_x10: u16::from_be_bytes([buf[4], buf[5]]),
             reserved2: u16::from_be_bytes([buf[6], buf[7]]),
+        })
+    }
+}
+
+/// Stage 4 Encrypted `HELLO_REQ` payload (105 bytes):
+///   0..8   : Base `HelloReqPayload`
+///   8..73  : Client ephemeral P-256 uncompressed SEC1 public key (65 bytes)
+///   73..89 : Client random nonce (16 bytes)
+///   89..105: Client HMAC-SHA256 PSK auth tag (16 bytes)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncryptedHelloReqPayload {
+    pub base: HelloReqPayload,
+    pub client_pub: [u8; 65],
+    pub client_nonce: [u8; 16],
+    pub auth_tag: [u8; 16],
+}
+
+impl EncryptedHelloReqPayload {
+    pub const BYTES: usize = 105;
+    pub const BODY_BEFORE_TAG: usize = 89;
+
+    pub fn pack(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        out[0..8].copy_from_slice(&self.base.pack());
+        out[8..73].copy_from_slice(&self.client_pub);
+        out[73..89].copy_from_slice(&self.client_nonce);
+        out[89..105].copy_from_slice(&self.auth_tag);
+        out
+    }
+
+    pub fn unpack(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::BYTES {
+            return None;
+        }
+        let base = HelloReqPayload::unpack(&buf[0..8])?;
+        let mut client_pub = [0u8; 65];
+        let mut client_nonce = [0u8; 16];
+        let mut auth_tag = [0u8; 16];
+        client_pub.copy_from_slice(&buf[8..73]);
+        client_nonce.copy_from_slice(&buf[73..89]);
+        auth_tag.copy_from_slice(&buf[89..105]);
+        Some(Self {
+            base,
+            client_pub,
+            client_nonce,
+            auth_tag,
+        })
+    }
+}
+
+/// Stage 4 Encrypted `HELLO_ACK` payload (113 bytes):
+///   0..12   : Base `HelloAckPayload`
+///   12..16  : Assigned ephemeral IPv4 inside relay TUN subnet (e.g. 10.77.0.2)
+///   16..81  : Server ephemeral P-256 uncompressed SEC1 public key (65 bytes)
+///   81..97  : Server random nonce (16 bytes)
+///   97..113 : Server HMAC-SHA256 PSK auth tag (16 bytes)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncryptedHelloAckPayload {
+    pub base: HelloAckPayload,
+    pub assigned_ipv4: [u8; 4],
+    pub server_pub: [u8; 65],
+    pub server_nonce: [u8; 16],
+    pub auth_tag: [u8; 16],
+}
+
+impl EncryptedHelloAckPayload {
+    pub const BYTES: usize = 113;
+    pub const BODY_BEFORE_TAG: usize = 97;
+
+    pub fn pack(&self) -> [u8; Self::BYTES] {
+        let mut out = [0u8; Self::BYTES];
+        out[0..12].copy_from_slice(&self.base.pack());
+        out[12..16].copy_from_slice(&self.assigned_ipv4);
+        out[16..81].copy_from_slice(&self.server_pub);
+        out[81..97].copy_from_slice(&self.server_nonce);
+        out[97..113].copy_from_slice(&self.auth_tag);
+        out
+    }
+
+    pub fn unpack(buf: &[u8]) -> Option<Self> {
+        if buf.len() < Self::BYTES {
+            return None;
+        }
+        let base = HelloAckPayload::unpack(&buf[0..12])?;
+        let mut assigned_ipv4 = [0u8; 4];
+        let mut server_pub = [0u8; 65];
+        let mut server_nonce = [0u8; 16];
+        let mut auth_tag = [0u8; 16];
+        assigned_ipv4.copy_from_slice(&buf[12..16]);
+        server_pub.copy_from_slice(&buf[16..81]);
+        server_nonce.copy_from_slice(&buf[81..97]);
+        auth_tag.copy_from_slice(&buf[97..113]);
+        Some(Self {
+            base,
+            assigned_ipv4,
+            server_pub,
+            server_nonce,
+            auth_tag,
         })
     }
 }

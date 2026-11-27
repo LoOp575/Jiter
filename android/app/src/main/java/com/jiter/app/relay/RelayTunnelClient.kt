@@ -30,6 +30,8 @@ data class RelayProbeResult(
 
 data class RelayDataStats(
     val connected: Boolean,
+    val encrypted: Boolean,
+    val assignedIpv4: String?,
     val region: String?,
     val relayRttMs: Double?,
     val txPackets: Long,
@@ -38,13 +40,13 @@ data class RelayDataStats(
 )
 
 /**
- * Stage 3 Protected UDP JITER Relay Client.
+ * Stage 4 Protected UDP JITER Relay Client.
  *
- * Uses a single dedicated reader thread to demultiplex incoming UDP datagrams cleanly
- * (`HELLO_ACK`, `PROBE_RESP`, `DATA_PLAIN`, `DATA_FEC`) without socket read contention.
- *
- * All UDP sockets pass through `VpnService.protect(DatagramSocket)` so tunnel traffic
- * never loops back into the local Android TUN interface.
+ * Security & Concurrency:
+ *   - Supports Stage 4 ECDHE P-256 + PSK mutual auth + HKDF-SHA256 + ChaCha20-Poly1305 AEAD
+ *     with 16-byte WireHeader bound as AAD and 64-packet Anti-Replay Window
+ *   - Uses a single dedicated reader thread to demultiplex incoming UDP datagrams cleanly
+ *   - Protects every socket via `VpnService.protect(DatagramSocket)` so tunnel traffic never loops
  */
 class RelayTunnelClient(
     private val onDownlinkPacket: (ByteArray) -> Unit,
@@ -53,6 +55,7 @@ class RelayTunnelClient(
     private val secureRandom = SecureRandom()
     private val running = AtomicBoolean(false)
     private val connectedFlag = AtomicBoolean(false)
+    private val encryptedFlag = AtomicBoolean(false)
 
     private val txSeq = AtomicInteger(1)
     private val txPacketsCounter = AtomicLong(0L)
@@ -72,7 +75,22 @@ class RelayTunnelClient(
     private var activePort: Int = 0
 
     @Volatile
+    private var activePsk: String = ""
+
+    @Volatile
     private var relayRegion: String? = null
+
+    @Volatile
+    private var assignedIpv4Internal: String? = null
+
+    @Volatile
+    private var acceptedMtuInternal: Int = 1280
+
+    @Volatile
+    private var relayCapsInternal: Int = 0
+
+    @Volatile
+    private var sessionCipher: SessionCipher? = null
 
     @Volatile
     private var socket: DatagramSocket? = null
@@ -89,11 +107,14 @@ class RelayTunnelClient(
     private val relayEwmaLock = Any()
     private val relayEwma = BitwiseEwmaEstimator()
 
-    private class PendingHello {
+    private class PendingHello(val expectEncrypted: Boolean) {
         val latch = CountDownLatch(1)
 
         @Volatile
-        var ack: HelloAckPayload? = null
+        var plainAck: HelloAckPayload? = null
+
+        @Volatile
+        var encryptedAck: EncryptedHelloAckPayload? = null
     }
 
     private class PendingProbe(val txUs: Long, val sentNs: Long) {
@@ -115,12 +136,28 @@ class RelayTunnelClient(
     val isConnected: Boolean
         get() = connectedFlag.get() && running.get()
 
-    fun matchesEndpoint(host: String, port: Int): Boolean =
-        activeHost == host.trim() && activePort == port
+    val isEncrypted: Boolean
+        get() = encryptedFlag.get() && sessionCipher != null
+
+    val assignedIpv4: String?
+        get() = assignedIpv4Internal
+
+    val acceptedMtu: Int
+        get() = acceptedMtuInternal
+
+    val relayCaps: Int
+        get() = relayCapsInternal
+
+    fun matchesConfig(config: BackendConfig): Boolean =
+        activeHost == config.relayHost.trim() &&
+            activePort == config.relayPort &&
+            activePsk == config.relayPsk.trim()
 
     /**
      * Opens a protected UDP socket to `host:port`, launches the demuxing reader thread,
-     * and performs the ephemeral `HELLO_REQ -> HELLO_ACK` handshake.
+     * and performs either:
+     *   - Stage 4 ECDHE P-256 + PSK mutual auth handshake (when `config.hasRelayPsk()`), or
+     *   - Plaintext diagnostic `HELLO_REQ -> HELLO_ACK` (when PSK is blank).
      */
     fun connect(
         config: BackendConfig,
@@ -132,6 +169,8 @@ class RelayTunnelClient(
 
         val host = config.relayHost.trim()
         val port = config.relayPort.coerceIn(1, 65535)
+        val psk = config.relayPsk.trim()
+        val useEncryption = psk.isNotEmpty()
 
         return try {
             val resolved = InetAddress.getByName(host)
@@ -148,7 +187,13 @@ class RelayTunnelClient(
             remoteAddr = target
             activeHost = host
             activePort = port
+            activePsk = psk
             socket = sock
+            sessionCipher = null
+            encryptedFlag.set(false)
+            assignedIpv4Internal = null
+            acceptedMtuInternal = 1280
+            relayCapsInternal = 0
             txSeq.set(1)
             txPacketsCounter.set(0L)
             rxPacketsCounter.set(0L)
@@ -163,39 +208,115 @@ class RelayTunnelClient(
             running.set(true)
             startReaderLoop(sock)
 
-            val helloWait = PendingHello()
-            pendingHello = helloWait
-
-            val helloPayload = HelloReqPayload(
+            val baseHello = HelloReqPayload(
                 profileId = profile.ordinal,
                 routingMode = config.routingMode.ordinal,
                 fecPolicy = config.fecPolicy.ordinal,
                 mtu = 1280,
                 linkHintMbpsX10 = 300,
-            ).pack()
-            val hdr = WireHeader(
-                msgType = RelayProtocol.MSG_HELLO_REQ,
-                trafficTier = RelayProtocol.TIER_GAME,
-                sessionId = sid,
-                sequence = txSeq.getAndIncrement(),
-                payloadLen = helloPayload.size,
-                pacerQ8 = 255,
-                fecMode = 0,
             )
-            sendRawFrame(hdr.frameBytes(helloPayload))
 
-            val gotAck = helloWait.latch.await(700L, TimeUnit.MILLISECONDS)
-            pendingHello = null
+            if (useEncryption) {
+                val pskKey = RelayCrypto.derivePskKey(psk)
+                val clientKp = EphemeralP256KeyPair.generate()
+                val clientNonce = RelayCrypto.randomNonce16()
 
-            val ack = helloWait.ack
-            if (gotAck && ack != null) {
-                relayRegion = ack.regionTag
+                val helloWait = PendingHello(expectEncrypted = true)
+                pendingHello = helloWait
+
+                val encPayload = EncryptedHelloReqPayload.buildSigned(
+                    base = baseHello,
+                    clientPub = clientKp.publicUncompressed,
+                    clientNonce = clientNonce,
+                    pskKey = pskKey,
+                    sessionId = sid,
+                )
+                val hdr = WireHeader(
+                    msgType = RelayProtocol.MSG_HELLO_REQ,
+                    trafficTier = RelayProtocol.TIER_GAME,
+                    flags = RelayProtocol.FLAG_ENCRYPTED,
+                    sessionId = sid,
+                    sequence = txSeq.getAndIncrement(),
+                    payloadLen = encPayload.size,
+                    pacerQ8 = 255,
+                    fecMode = 0,
+                )
+                sendRawFrame(hdr.frameBytes(encPayload))
+
+                val gotAck = helloWait.latch.await(1_000L, TimeUnit.MILLISECONDS)
+                pendingHello = null
+
+                val encAck = helloWait.encryptedAck
+                if (!gotAck || encAck == null) {
+                    disconnect(sendGoodbye = false)
+                    return false
+                }
+
+                // Verify server mutual auth MAC in constant time
+                val expectedServerTag = RelayCrypto.computeHelloAckTag(
+                    pskKey = pskKey,
+                    sessionId = sid,
+                    clientNonce = clientNonce,
+                    bodyBeforeTag = encAck.bodyBeforeTag,
+                )
+                if (!RelayCrypto.constantTimeEquals(expectedServerTag, encAck.authTag)) {
+                    disconnect(sendGoodbye = false)
+                    return false
+                }
+
+                val ecdhShared = clientKp.diffieHellman(encAck.serverPub)
+                if (ecdhShared == null) {
+                    disconnect(sendGoodbye = false)
+                    return false
+                }
+
+                val keys = RelayCrypto.deriveSessionKeys(
+                    ecdhShared = ecdhShared,
+                    pskKey = pskKey,
+                    clientNonce = clientNonce,
+                    serverNonce = encAck.serverNonce,
+                    sessionId = sid,
+                )
+                sessionCipher = SessionCipher.forClient(keys)
+                encryptedFlag.set(true)
+                relayRegion = encAck.base.regionTag
+                acceptedMtuInternal = encAck.base.acceptedMtu.coerceIn(576, 1400)
+                relayCapsInternal = encAck.base.relayCaps
+                assignedIpv4Internal = encAck.assignedIpv4String
                 connectedFlag.set(true)
                 true
             } else {
-                connectedFlag.set(false)
-                relayRegion = null
-                false
+                val helloWait = PendingHello(expectEncrypted = false)
+                pendingHello = helloWait
+
+                val helloPayload = baseHello.pack()
+                val hdr = WireHeader(
+                    msgType = RelayProtocol.MSG_HELLO_REQ,
+                    trafficTier = RelayProtocol.TIER_GAME,
+                    flags = 0,
+                    sessionId = sid,
+                    sequence = txSeq.getAndIncrement(),
+                    payloadLen = helloPayload.size,
+                    pacerQ8 = 255,
+                    fecMode = 0,
+                )
+                sendRawFrame(hdr.frameBytes(helloPayload))
+
+                val gotAck = helloWait.latch.await(700L, TimeUnit.MILLISECONDS)
+                pendingHello = null
+
+                val ack = helloWait.plainAck
+                if (gotAck && ack != null) {
+                    relayRegion = ack.regionTag
+                    acceptedMtuInternal = ack.acceptedMtu.coerceIn(576, 1400)
+                    relayCapsInternal = ack.relayCaps
+                    connectedFlag.set(true)
+                    true
+                } else {
+                    connectedFlag.set(false)
+                    relayRegion = null
+                    false
+                }
             }
         } catch (_: Exception) {
             disconnect(sendGoodbye = false)
@@ -226,17 +347,17 @@ class RelayTunnelClient(
             clientTxUs = txUs,
             profileId = profile.ordinal,
         ).pack()
-        val hdr = WireHeader(
+
+        val frame = buildOutgoingFrame(
             msgType = RelayProtocol.MSG_PROBE_REQ,
-            trafficTier = RelayProtocol.TIER_GAME,
-            sessionId = sessionId,
-            sequence = txSeq.getAndIncrement(),
-            payloadLen = reqPayload.size,
+            tier = RelayProtocol.TIER_GAME,
+            extraFlags = 0,
             pacerQ8 = RelayProtocol.pacerRatioToQ8(bgPacerRatio),
-            fecMode = RelayProtocol.fecModeToWireByte(fecMode),
+            wireFecMode = RelayProtocol.fecModeToWireByte(fecMode),
+            plaintext = reqPayload,
         )
 
-        if (!sendRawFrame(hdr.frameBytes(reqPayload))) {
+        if (frame == null || !sendRawFrame(frame)) {
             pendingProbe = null
             connectedFlag.set(false)
             return RelayProbeResult(false, null, null, relayRegion, remoteFecRecovered.get())
@@ -299,21 +420,21 @@ class RelayTunnelClient(
             pacerQ8 = RelayProtocol.pacerRatioToQ8(bgPacerRatio),
             linkMbpsX10 = linkX10,
         ).pack()
-        val hdr = WireHeader(
+        val frame = buildOutgoingFrame(
             msgType = RelayProtocol.MSG_POLICY_SYNC,
-            trafficTier = RelayProtocol.TIER_GAME,
-            sessionId = sessionId,
-            sequence = txSeq.getAndIncrement(),
-            payloadLen = payload.size,
+            tier = RelayProtocol.TIER_GAME,
+            extraFlags = 0,
             pacerQ8 = RelayProtocol.pacerRatioToQ8(bgPacerRatio),
-            fecMode = RelayProtocol.fecModeToWireByte(fecMode),
-        )
-        sendRawFrame(hdr.frameBytes(payload))
+            wireFecMode = RelayProtocol.fecModeToWireByte(fecMode),
+            plaintext = payload,
+        ) ?: return
+        sendRawFrame(frame)
     }
 
     /**
      * Transmits one prioritized TUN IPv4 packet to the Relay.
-     * Applies GF(2) XOR Parity FEC automatically on `TIER_GAME` packets when `fecMode != OFF`.
+     * Applies GF(2) XOR Parity FEC automatically on `TIER_GAME` packets when `fecMode != OFF`,
+     * and ChaCha20-Poly1305 AEAD encryption whenever a PSK session cipher is active.
      */
     fun sendDataPacket(
         trafficTier: Int,
@@ -322,7 +443,12 @@ class RelayTunnelClient(
         fecMode: FecMode,
         bgPacerRatio: Double,
     ): Boolean {
-        if (!isConnected || length <= 0 || length > RelayProtocol.MAX_PAYLOAD_BYTES) {
+        val maxPlain = if (sessionCipher != null) {
+            RelayProtocol.MAX_PAYLOAD_BYTES - RelayCrypto.AEAD_TAG_BYTES
+        } else {
+            RelayProtocol.MAX_PAYLOAD_BYTES
+        }
+        if (!isConnected || length <= 0 || length > maxPlain) {
             return false
         }
         val pacerQ8 = RelayProtocol.pacerRatioToQ8(bgPacerRatio)
@@ -346,18 +472,16 @@ class RelayTunnelClient(
                 var allSent = true
                 for (fr in frames) {
                     val fecWire = fr.toWireBytes()
-                    if (fecWire.size > RelayProtocol.MAX_PAYLOAD_BYTES) continue
-                    val hdr = WireHeader(
+                    if (fecWire.size > maxPlain) continue
+                    val wire = buildOutgoingFrame(
                         msgType = RelayProtocol.MSG_DATA_FEC,
-                        trafficTier = trafficTier,
-                        flags = if (fr.isParity) RelayProtocol.FLAG_FEC_PARITY else 0,
-                        sessionId = sessionId,
-                        sequence = txSeq.getAndIncrement(),
-                        payloadLen = fecWire.size,
+                        tier = trafficTier,
+                        extraFlags = if (fr.isParity) RelayProtocol.FLAG_FEC_PARITY else 0,
                         pacerQ8 = pacerQ8,
-                        fecMode = wireFecMode,
+                        wireFecMode = wireFecMode,
+                        plaintext = fecWire,
                     )
-                    if (!sendRawFrame(hdr.frameBytes(fecWire))) {
+                    if (wire == null || !sendRawFrame(wire)) {
                         allSent = false
                     }
                 }
@@ -366,16 +490,17 @@ class RelayTunnelClient(
             }
         }
 
-        val hdr = WireHeader(
+        val wire = buildOutgoingFrame(
             msgType = RelayProtocol.MSG_DATA_PLAIN,
-            trafficTier = trafficTier,
-            sessionId = sessionId,
-            sequence = txSeq.getAndIncrement(),
-            payloadLen = length,
+            tier = trafficTier,
+            extraFlags = 0,
             pacerQ8 = pacerQ8,
-            fecMode = wireFecMode,
-        )
-        val ok = sendRawFrame(hdr.frameBytes(rawIpv4, length))
+            wireFecMode = wireFecMode,
+            plaintext = rawIpv4,
+            plainLen = length,
+        ) ?: return false
+
+        val ok = sendRawFrame(wire)
         if (ok) txPacketsCounter.incrementAndGet()
         return ok
     }
@@ -385,6 +510,8 @@ class RelayTunnelClient(
         val srtt = synchronized(relayEwmaLock) { relayEwma.srttMs }
         return RelayDataStats(
             connected = isConnected,
+            encrypted = isEncrypted,
+            assignedIpv4 = assignedIpv4Internal,
             region = relayRegion,
             relayRttMs = srtt,
             txPackets = txPacketsCounter.get(),
@@ -395,21 +522,24 @@ class RelayTunnelClient(
 
     fun disconnect(sendGoodbye: Boolean = true) {
         if (sendGoodbye && running.get() && sessionId != 0) {
-            val byeHdr = WireHeader(
+            val byeFrame = buildOutgoingFrame(
                 msgType = RelayProtocol.MSG_CONTROL,
-                trafficTier = RelayProtocol.TIER_GAME,
-                flags = RelayProtocol.FLAG_GOODBYE,
-                sessionId = sessionId,
-                sequence = txSeq.getAndIncrement(),
-                payloadLen = 0,
+                tier = RelayProtocol.TIER_GAME,
+                extraFlags = RelayProtocol.FLAG_GOODBYE,
                 pacerQ8 = 255,
-                fecMode = 0,
+                wireFecMode = 0,
+                plaintext = ByteArray(0),
+                plainLen = 0,
             )
-            sendRawFrame(byeHdr.frameBytes(ByteArray(0), 0))
+            if (byeFrame != null) {
+                sendRawFrame(byeFrame)
+            }
         }
 
         running.set(false)
         connectedFlag.set(false)
+        encryptedFlag.set(false)
+        sessionCipher = null
         pendingHello?.latch?.countDown()
         pendingProbe?.latch?.countDown()
         pendingHello = null
@@ -436,8 +566,57 @@ class RelayTunnelClient(
         remoteAddr = null
         activeHost = ""
         activePort = 0
+        activePsk = ""
         relayRegion = null
+        assignedIpv4Internal = null
+        relayCapsInternal = 0
         sessionId = 0
+    }
+
+    private fun buildOutgoingFrame(
+        msgType: Int,
+        tier: Int,
+        extraFlags: Int,
+        pacerQ8: Int,
+        wireFecMode: Int,
+        plaintext: ByteArray,
+        plainLen: Int = plaintext.size,
+    ): ByteArray? {
+        val seq = txSeq.getAndIncrement()
+        val cipher = sessionCipher
+        return if (cipher != null) {
+            val ctLen = plainLen + RelayCrypto.AEAD_TAG_BYTES
+            if (ctLen > RelayProtocol.MAX_PAYLOAD_BYTES) return null
+            val hdr = WireHeader(
+                msgType = msgType,
+                trafficTier = tier,
+                flags = extraFlags or RelayProtocol.FLAG_ENCRYPTED,
+                sessionId = sessionId,
+                sequence = seq,
+                payloadLen = ctLen,
+                pacerQ8 = pacerQ8,
+                fecMode = wireFecMode,
+            )
+            val aad = hdr.pack()
+            val ct = cipher.encrypt(sessionId, seq, aad, plaintext, plainLen) ?: return null
+            val out = ByteArray(RelayProtocol.WIRE_HEADER_BYTES + ct.size)
+            System.arraycopy(aad, 0, out, 0, RelayProtocol.WIRE_HEADER_BYTES)
+            System.arraycopy(ct, 0, out, RelayProtocol.WIRE_HEADER_BYTES, ct.size)
+            out
+        } else {
+            if (plainLen > RelayProtocol.MAX_PAYLOAD_BYTES) return null
+            val hdr = WireHeader(
+                msgType = msgType,
+                trafficTier = tier,
+                flags = extraFlags and RelayProtocol.FLAG_ENCRYPTED.inv(),
+                sessionId = sessionId,
+                sequence = seq,
+                payloadLen = plainLen,
+                pacerQ8 = pacerQ8,
+                fecMode = wireFecMode,
+            )
+            hdr.frameBytes(plaintext, plainLen)
+        }
     }
 
     private fun sendRawFrame(bytes: ByteArray): Boolean {
@@ -484,18 +663,65 @@ class RelayTunnelClient(
         val payloadEnd = RelayProtocol.WIRE_HEADER_BYTES + hdr.payloadLen
         if (len < payloadEnd) return
 
-        when (hdr.msgType) {
-            RelayProtocol.MSG_HELLO_ACK -> {
-                val ack = HelloAckPayload.unpack(buf, RelayProtocol.WIRE_HEADER_BYTES, hdr.payloadLen)
-                if (ack != null) {
-                    pendingHello?.let { waiter ->
-                        waiter.ack = ack
-                        waiter.latch.countDown()
-                    }
+        val isEncFrame = (hdr.flags and RelayProtocol.FLAG_ENCRYPTED) != 0
+
+        if (hdr.msgType == RelayProtocol.MSG_HELLO_ACK) {
+            val waiter = pendingHello ?: return
+            if (waiter.expectEncrypted) {
+                if (!isEncFrame) return
+                val encAck = EncryptedHelloAckPayload.unpack(
+                    buf,
+                    RelayProtocol.WIRE_HEADER_BYTES,
+                    hdr.payloadLen,
+                )
+                if (encAck != null) {
+                    waiter.encryptedAck = encAck
+                    waiter.latch.countDown()
+                }
+            } else {
+                if (isEncFrame) return
+                val plainAck = HelloAckPayload.unpack(
+                    buf,
+                    RelayProtocol.WIRE_HEADER_BYTES,
+                    hdr.payloadLen,
+                )
+                if (plainAck != null) {
+                    waiter.plainAck = plainAck
+                    waiter.latch.countDown()
                 }
             }
+            return
+        }
+
+        // Decrypt & check Anti-Replay Window if AEAD cipher is active
+        val cipher = sessionCipher
+        val plainBytes: ByteArray
+        val plainOff: Int
+        val plainLen: Int
+        if (cipher != null) {
+            if (!isEncFrame) return
+            val aad = buf.copyOfRange(0, RelayProtocol.WIRE_HEADER_BYTES)
+            val decrypted = cipher.decryptAndCheckReplay(
+                sessionId = hdr.sessionId,
+                sequence = hdr.sequence,
+                aadHeader = aad,
+                ciphertext = buf,
+                offset = RelayProtocol.WIRE_HEADER_BYTES,
+                length = hdr.payloadLen,
+            ) ?: return
+            plainBytes = decrypted
+            plainOff = 0
+            plainLen = decrypted.size
+        } else {
+            if (isEncFrame) return
+            plainBytes = buf
+            plainOff = RelayProtocol.WIRE_HEADER_BYTES
+            plainLen = hdr.payloadLen
+        }
+
+        when (hdr.msgType) {
             RelayProtocol.MSG_PROBE_RESP -> {
-                val resp = ProbeRespPayload.unpack(buf, RelayProtocol.WIRE_HEADER_BYTES, hdr.payloadLen)
+                val resp = ProbeRespPayload.unpack(plainBytes, plainOff, plainLen)
                 if (resp != null) {
                     pendingProbe?.let { waiter ->
                         if (waiter.txUs == resp.echoTxUs) {
@@ -507,15 +733,15 @@ class RelayTunnelClient(
                 }
             }
             RelayProtocol.MSG_DATA_PLAIN -> {
-                if (hdr.payloadLen > 0) {
-                    val payload = buf.copyOfRange(RelayProtocol.WIRE_HEADER_BYTES, payloadEnd)
+                if (plainLen > 0) {
+                    val payload = plainBytes.copyOfRange(plainOff, plainOff + plainLen)
                     rxPacketsCounter.incrementAndGet()
                     onDownlinkPacket(payload)
                 }
             }
             RelayProtocol.MSG_DATA_FEC -> {
-                if (hdr.payloadLen >= FecFrame.HEADER_SIZE) {
-                    val wireFec = buf.copyOfRange(RelayProtocol.WIRE_HEADER_BYTES, payloadEnd)
+                if (plainLen >= FecFrame.HEADER_SIZE) {
+                    val wireFec = plainBytes.copyOfRange(plainOff, plainOff + plainLen)
                     val delivered = try {
                         val fecFrame = FecFrame.fromWireBytes(wireFec)
                         synchronized(fecLock) {

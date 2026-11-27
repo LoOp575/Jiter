@@ -1,12 +1,20 @@
 [package]
 name = "jiter-relay"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
-description = "JITER Stage 3 Edge Relay Server (Jakarta/Singapore) with 3-tier strict-priority pacer and GF(2) XOR FEC"
+description = "JITER Stage 4 Edge Relay Server (Jakarta/Singapore) with ECDHE P-256 + ChaCha20-Poly1305 AEAD, Linux TUN NAT, 3-tier strict-priority pacer, and GF(2) XOR FEC"
 license = "MIT"
 
 [dependencies]
 jiter-math = { path = "../engine-rust" }
+chacha20poly1305 = "0.10.1"
+p256 = { version = "0.13.2", features = ["ecdh"] }
+hkdf = "0.12.4"
+sha2 = "0.10.8"
+hmac = "0.12.1"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+subtle = "2.6.1"
+libc = "0.2"
 
 [lib]
 name = "jiter_relay"

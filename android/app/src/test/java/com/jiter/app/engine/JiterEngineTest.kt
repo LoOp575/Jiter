@@ -6,8 +6,18 @@ import com.jiter.app.config.AppLanguage
 import com.jiter.app.config.BackendConfig
 import com.jiter.app.config.LanguageManager
 import com.jiter.app.config.RoutingMode
+import com.jiter.app.config.TunnelScope
+import com.jiter.app.context.UidFlowClassifier
+import com.jiter.app.relay.EncryptedHelloAckPayload
+import com.jiter.app.relay.EncryptedHelloReqPayload
+import com.jiter.app.relay.EphemeralP256KeyPair
+import com.jiter.app.relay.HelloAckPayload
+import com.jiter.app.relay.HelloReqPayload
+import com.jiter.app.relay.RelayCrypto
 import com.jiter.app.relay.RelayProtocol
 import com.jiter.app.relay.RelayTunnelClient
+import com.jiter.app.relay.ReplayWindow
+import com.jiter.app.relay.SessionCipher
 import com.jiter.app.relay.WireHeader
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -530,5 +540,376 @@ class JiterEngineTest {
             serverSock.close()
             serverThread.join(1_000L)
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Stage 4: Cross-Language AEAD Golden Vector, ECDHE P-256, Replay & UID
+    // ------------------------------------------------------------------------
+
+    private fun hexToBytes(hex: String): ByteArray =
+        ByteArray(hex.length / 2) { i ->
+            hex.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+
+    @Test
+    fun stage4CryptoGoldenVectorMatchesRustByteForByte() {
+        val pskKey = RelayCrypto.derivePskKey("jiter-golden-psk-2026")
+        assertArrayEquals(
+            hexToBytes("9716cac97a20451428ec0851a9cf6292a73eb7be982935df53a64205f0a36c96"),
+            pskKey,
+        )
+
+        val ecdhShared = ByteArray(32) { 0x42 }
+        val cNonce = ByteArray(16) { 0x11 }
+        val sNonce = ByteArray(16) { 0x22 }
+        val sessionId = 0x11223344
+
+        val keys = RelayCrypto.deriveSessionKeys(ecdhShared, pskKey, cNonce, sNonce, sessionId)
+        assertArrayEquals(
+            hexToBytes("f300fec671057d5c58611466e5a64277de822f4eb866a5d5b56ee2e4b13ca99b"),
+            keys.c2sKey,
+        )
+        assertArrayEquals(
+            hexToBytes("072a0d8ed9b240be40601291e593b2a6d1a5de5ae97b4bef54d171979a665bd4"),
+            keys.s2cKey,
+        )
+        assertArrayEquals(hexToBytes("8266924c"), keys.c2sIv)
+        assertArrayEquals(hexToBytes("e64d89ea"), keys.s2cIv)
+
+        val clientCipher = SessionCipher.forClient(keys)
+        val serverCipher = SessionCipher.forServer(keys)
+
+        val aadHdr = WireHeader(
+            version = RelayProtocol.WIRE_VERSION,
+            msgType = RelayProtocol.MSG_DATA_PLAIN,
+            trafficTier = RelayProtocol.TIER_GAME,
+            flags = RelayProtocol.FLAG_ENCRYPTED,
+            sessionId = sessionId,
+            sequence = 7,
+            payloadLen = 16 + RelayCrypto.AEAD_TAG_BYTES,
+            pacerQ8 = 89,
+            fecMode = 2,
+        ).pack()
+
+        val plaintext = "JITER_AEAD_CHECK".toByteArray(Charsets.UTF_8)
+        val ct = requireNotNull(clientCipher.encrypt(sessionId, 7, aadHdr, plaintext))
+        assertArrayEquals(
+            hexToBytes("6352f703709ce93a8853ee5804a31ac16f9e112af1230e8aa353a3f6c0e2d361"),
+            ct,
+        )
+
+        // Tampering 1 bit of AAD header must fail Poly1305 verification
+        val badAad = aadHdr.copyOf()
+        badAad[14] = (badAad[14].toInt() xor 0x01).toByte()
+        assertNull(serverCipher.decryptAndCheckReplay(sessionId, 7, badAad, ct))
+
+        // Valid decryption succeeds bit-exact
+        val decrypted = requireNotNull(serverCipher.decryptAndCheckReplay(sessionId, 7, aadHdr, ct))
+        assertArrayEquals(plaintext, decrypted)
+
+        // Exact replay must be dropped
+        assertNull(serverCipher.decryptAndCheckReplay(sessionId, 7, aadHdr, ct))
+
+        // Empty plaintext (e.g. encrypted GOODBYE) works cleanly with 16B Poly1305 tag
+        val byeAad = WireHeader(
+            msgType = RelayProtocol.MSG_CONTROL,
+            flags = RelayProtocol.FLAG_GOODBYE or RelayProtocol.FLAG_ENCRYPTED,
+            sessionId = sessionId,
+            sequence = 8,
+            payloadLen = RelayCrypto.AEAD_TAG_BYTES,
+        ).pack()
+        val byeCt = requireNotNull(clientCipher.encrypt(sessionId, 8, byeAad, ByteArray(0), 0))
+        assertEquals(RelayCrypto.AEAD_TAG_BYTES, byeCt.size)
+        val byePlain = requireNotNull(serverCipher.decryptAndCheckReplay(sessionId, 8, byeAad, byeCt))
+        assertEquals(0, byePlain.size)
+    }
+
+    @Test
+    fun stage4EcdheP256ReplayWindowAndEncryptedPayloads() {
+        val clientKp = EphemeralP256KeyPair.generate()
+        val serverKp = EphemeralP256KeyPair.generate()
+        assertEquals(RelayCrypto.P256_UNCOMPRESSED_PUB_BYTES, clientKp.publicUncompressed.size)
+        assertEquals(0x04.toByte(), clientKp.publicUncompressed[0])
+
+        val sharedA = requireNotNull(clientKp.diffieHellman(serverKp.publicUncompressed))
+        val sharedB = requireNotNull(serverKp.diffieHellman(clientKp.publicUncompressed))
+        assertEquals(32, sharedA.size)
+        assertArrayEquals(sharedA, sharedB)
+
+        // Encrypted HELLO_REQ & HELLO_ACK round-trip
+        val pskKey = RelayCrypto.derivePskKey("stage4-test-psk")
+        val cNonce = RelayCrypto.randomNonce16()
+        val sNonce = RelayCrypto.randomNonce16()
+        val sid = 0x55AA1234
+
+        val reqRaw = EncryptedHelloReqPayload.buildSigned(
+            base = HelloReqPayload(0, 0, 0, 1280, 450),
+            clientPub = clientKp.publicUncompressed,
+            clientNonce = cNonce,
+            pskKey = pskKey,
+            sessionId = sid,
+        )
+        val expectedReqTag = RelayCrypto.computeHelloReqTag(
+            pskKey,
+            sid,
+            reqRaw.copyOfRange(0, RelayProtocol.ENCRYPTED_HELLO_REQ_BODY_BEFORE_TAG),
+        )
+        val unpackedReq = requireNotNull(EncryptedHelloReqPayload.unpack(reqRaw))
+        assertArrayEquals(clientKp.publicUncompressed, unpackedReq.clientPub)
+        assertTrue(RelayCrypto.constantTimeEquals(expectedReqTag, unpackedReq.authTag))
+
+        val ackRaw = EncryptedHelloAckPayload.buildSigned(
+            base = HelloAckPayload(
+                acceptedMtu = 1280,
+                relayCaps = RelayProtocol.RELAY_CAP_AEAD_CHACHA20 or RelayProtocol.RELAY_CAP_TUN_NAT,
+                regionTag = "JKT-TUN",
+            ),
+            assignedIpv4 = byteArrayOf(10, 77, 0, 42),
+            serverPub = serverKp.publicUncompressed,
+            serverNonce = sNonce,
+            clientNonce = cNonce,
+            pskKey = pskKey,
+            sessionId = sid,
+        )
+        val unpackedAck = requireNotNull(EncryptedHelloAckPayload.unpack(ackRaw))
+        assertEquals("10.77.0.42", unpackedAck.assignedIpv4String)
+        assertEquals("JKT-TUN", unpackedAck.base.regionTag)
+        val expectedAckTag = RelayCrypto.computeHelloAckTag(
+            pskKey,
+            sid,
+            cNonce,
+            unpackedAck.bodyBeforeTag,
+        )
+        assertTrue(RelayCrypto.constantTimeEquals(expectedAckTag, unpackedAck.authTag))
+
+        // ReplayWindow boundary cases
+        val rw = ReplayWindow()
+        assertFalse(rw.wouldAccept(0))
+        assertTrue(rw.wouldAccept(10))
+        rw.markAccepted(10)
+        assertFalse(rw.wouldAccept(10))
+        assertTrue(rw.wouldAccept(5))
+        rw.markAccepted(5)
+        assertFalse(rw.wouldAccept(5))
+        rw.markAccepted(100)
+        assertFalse(rw.wouldAccept(36)) // 100 - 36 == 64 -> outside window
+        assertTrue(rw.wouldAccept(37))  // 100 - 37 == 63 -> inside window
+    }
+
+    @Test
+    fun stage4EncryptedUdpHandshakeProbeEchoAndGoodbye() {
+        val psk = "unit-test-aead-psk-2026"
+        val pskKey = RelayCrypto.derivePskKey(psk)
+
+        val serverSock = DatagramSocket(0, InetAddress.getByName("127.0.0.1"))
+        serverSock.soTimeout = 200
+        val stopServer = AtomicBoolean(false)
+        val gotEncryptedGoodbye = CountDownLatch(1)
+
+        val serverThread = Thread({
+            val rx = ByteArray(2048)
+            val pkt = DatagramPacket(rx, rx.size)
+            var serverCipher: SessionCipher? = null
+            var txSeq = 0
+
+            while (!stopServer.get() && !serverSock.isClosed) {
+                try {
+                    pkt.length = rx.size
+                    serverSock.receive(pkt)
+                    val hdr = WireHeader.unpack(rx, pkt.length) ?: continue
+                    if ((hdr.flags and RelayProtocol.FLAG_ENCRYPTED) == 0) continue
+
+                    val payloadStart = RelayProtocol.WIRE_HEADER_BYTES
+                    val payloadEnd = payloadStart + hdr.payloadLen
+                    if (payloadEnd > pkt.length) continue
+
+                    if (hdr.msgType == RelayProtocol.MSG_HELLO_REQ) {
+                        val reqBytes = rx.copyOfRange(payloadStart, payloadEnd)
+                        val req = EncryptedHelloReqPayload.unpack(reqBytes) ?: continue
+                        val expectedTag = RelayCrypto.computeHelloReqTag(
+                            pskKey,
+                            hdr.sessionId,
+                            reqBytes.copyOfRange(0, RelayProtocol.ENCRYPTED_HELLO_REQ_BODY_BEFORE_TAG),
+                        )
+                        if (!RelayCrypto.constantTimeEquals(expectedTag, req.authTag)) continue
+
+                        val serverKp = EphemeralP256KeyPair.generate()
+                        val serverNonce = RelayCrypto.randomNonce16()
+                        val shared = serverKp.diffieHellman(req.clientPub) ?: continue
+                        val keys = RelayCrypto.deriveSessionKeys(
+                            shared,
+                            pskKey,
+                            req.clientNonce,
+                            serverNonce,
+                            hdr.sessionId,
+                        )
+                        serverCipher = SessionCipher.forServer(keys)
+
+                        val ackBytes = EncryptedHelloAckPayload.buildSigned(
+                            base = HelloAckPayload(
+                                acceptedMtu = 1280,
+                                relayCaps = RelayProtocol.RELAY_CAP_AEAD_CHACHA20 or RelayProtocol.RELAY_CAP_TUN_NAT,
+                                regionTag = "SG-AEAD",
+                            ),
+                            assignedIpv4 = byteArrayOf(10, 77, 0, 9),
+                            serverPub = serverKp.publicUncompressed,
+                            serverNonce = serverNonce,
+                            clientNonce = req.clientNonce,
+                            pskKey = pskKey,
+                            sessionId = hdr.sessionId,
+                        )
+
+                        txSeq += 1
+                        val resp = WireHeader(
+                            msgType = RelayProtocol.MSG_HELLO_ACK,
+                            flags = RelayProtocol.FLAG_ENCRYPTED,
+                            sessionId = hdr.sessionId,
+                            sequence = txSeq,
+                            payloadLen = ackBytes.size,
+                        ).frameBytes(ackBytes)
+                        serverSock.send(DatagramPacket(resp, resp.size, pkt.address, pkt.port))
+                        continue
+                    }
+
+                    val cipher = serverCipher ?: continue
+                    val aad = rx.copyOfRange(0, RelayProtocol.WIRE_HEADER_BYTES)
+                    val plain = cipher.decryptAndCheckReplay(
+                        hdr.sessionId,
+                        hdr.sequence,
+                        aad,
+                        rx,
+                        payloadStart,
+                        hdr.payloadLen,
+                    ) ?: continue
+
+                    fun sendEnc(msgType: Int, tier: Int, body: ByteArray) {
+                        txSeq += 1
+                        val respHdr = WireHeader(
+                            msgType = msgType,
+                            trafficTier = tier,
+                            flags = RelayProtocol.FLAG_ENCRYPTED,
+                            sessionId = hdr.sessionId,
+                            sequence = txSeq,
+                            payloadLen = body.size + RelayCrypto.AEAD_TAG_BYTES,
+                        ).pack()
+                        val ct = cipher.encrypt(hdr.sessionId, txSeq, respHdr, body) ?: return
+                        val wire = ByteArray(respHdr.size + ct.size)
+                        respHdr.copyInto(wire, 0)
+                        ct.copyInto(wire, respHdr.size)
+                        serverSock.send(DatagramPacket(wire, wire.size, pkt.address, pkt.port))
+                    }
+
+                    when (hdr.msgType) {
+                        RelayProtocol.MSG_PROBE_REQ -> {
+                            val txUs = RelayProtocol.getU64(plain, 0)
+                            val respPayload = ByteArray(RelayProtocol.PROBE_RESP_BYTES)
+                            RelayProtocol.putU64(respPayload, 0, txUs)
+                            RelayProtocol.putU32(respPayload, 8, 25)
+                            RelayProtocol.putU32(respPayload, 12, 800)
+                            RelayProtocol.putU32(respPayload, 16, 4)
+                            RelayProtocol.putU16(respPayload, 20, hdr.pacerQ8)
+                            RelayProtocol.putU16(respPayload, 22, hdr.fecMode)
+                            sendEnc(RelayProtocol.MSG_PROBE_RESP, hdr.trafficTier, respPayload)
+                        }
+                        RelayProtocol.MSG_DATA_PLAIN -> {
+                            sendEnc(RelayProtocol.MSG_DATA_PLAIN, hdr.trafficTier, plain)
+                        }
+                        RelayProtocol.MSG_CONTROL -> {
+                            if ((hdr.flags and RelayProtocol.FLAG_GOODBYE) != 0) {
+                                gotEncryptedGoodbye.countDown()
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Timeout or closed
+                }
+            }
+        }, "test-mock-aead-relay").apply { start() }
+
+        try {
+            val echoedPayload = AtomicReference<ByteArray?>(null)
+            val echoLatch = CountDownLatch(1)
+            val client = RelayTunnelClient(
+                onDownlinkPacket = { data ->
+                    echoedPayload.set(data)
+                    echoLatch.countDown()
+                },
+            )
+
+            // Wrong PSK must fail handshake cleanly
+            val badCfg = BackendConfig(
+                relayHost = "127.0.0.1",
+                relayPort = serverSock.localPort,
+                relayPsk = "wrong-psk",
+                tunnelScope = TunnelScope.FULL_INTERNET_TUNNEL,
+            )
+            assertFalse(client.connect(badCfg, TrafficProfile.GAME) { true })
+            assertFalse(client.isEncrypted)
+
+            // Valid PSK succeeds with AEAD + dynamic assigned IPv4
+            val goodCfg = badCfg.copy(relayPsk = psk)
+            assertTrue(client.connect(goodCfg, TrafficProfile.GAME) { true })
+            assertTrue(client.isConnected)
+            assertTrue(client.isEncrypted)
+            assertEquals("10.77.0.9", client.assignedIpv4)
+
+            val probe = client.probeRelay(TrafficProfile.GAME, FecMode.XOR_K2_INTERLEAVED, 0.30)
+            assertTrue(probe.reachable)
+            assertEquals("SG-AEAD", probe.relayRegion)
+            assertEquals(4L, probe.relayFecRecovered)
+
+            val secretPkt = "JITER_STAGE4_AEAD_UDP_PAYLOAD".toByteArray(Charsets.UTF_8)
+            assertTrue(
+                client.sendDataPacket(
+                    trafficTier = RelayProtocol.TIER_GAME,
+                    rawIpv4 = secretPkt,
+                    length = secretPkt.size,
+                    fecMode = FecMode.OFF,
+                    bgPacerRatio = 0.30,
+                ),
+            )
+            assertTrue(echoLatch.await(1, TimeUnit.SECONDS))
+            assertArrayEquals(secretPkt, echoedPayload.get())
+
+            client.disconnect(sendGoodbye = true)
+            assertFalse(client.isConnected)
+            assertFalse(client.isEncrypted)
+            assertTrue(gotEncryptedGoodbye.await(1, TimeUnit.SECONDS))
+        } finally {
+            stopServer.set(true)
+            serverSock.close()
+            serverThread.join(1_000L)
+        }
+    }
+
+    @Test
+    fun stage4UidFlowClassifierAndBackendConfigTunnelScope() {
+        assertEquals(
+            RelayProtocol.TIER_GAME,
+            UidFlowClassifier.classifyPackages(arrayOf("com.mobile.legends")),
+        )
+        assertEquals(
+            RelayProtocol.TIER_STREAMING,
+            UidFlowClassifier.classifyPackages(arrayOf("com.google.android.youtube")),
+        )
+        assertEquals(
+            RelayProtocol.TIER_BACKGROUND,
+            UidFlowClassifier.classifyPackages(arrayOf("com.android.providers.downloads")),
+        )
+        assertEquals(
+            -1,
+            UidFlowClassifier.classifyPackages(arrayOf("com.example.notepad")),
+        )
+
+        val cfg = BackendConfig(
+            relayHost = "  jkt-vps.jiter.net ",
+            relayPsk = "  my-secret-psk  ",
+            tunnelScope = TunnelScope.FULL_INTERNET_TUNNEL,
+        ).sanitized()
+        assertEquals("my-secret-psk", cfg.relayPsk)
+        assertTrue(cfg.hasRelayPsk())
+        assertEquals(TunnelScope.FULL_INTERNET_TUNNEL, cfg.tunnelScope)
+        assertTrue(cfg.summaryLabel().contains("Full TUN"))
+        assertTrue(cfg.summaryLabel().contains("AEAD"))
     }
 }
