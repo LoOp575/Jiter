@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JITER</string>
+    <string name="app_subtitle">Low-Latency Network Stability Engine (Stage 2 PoC)</string>
+
+    <string name="action_go">GO</string>
+    <string name="action_stop">STOP</string>
+
+    <string name="notification_channel_name">JITER Active Session</string>
+    <string name="notification_channel_desc">Shows live JITER tunnel state, probe RTT, jitter, and active profile.</string>
+
+    <string name="section_profile">Adaptive Profile (No Tunnel Restart)</string>
+    <string name="profile_auto">Auto</string>
+    <string name="profile_game">Game</string>
+    <string name="profile_streaming">Streaming</string>
+    <string name="profile_download">Download</string>
+
+    <string name="label_probe_rtt">Probe RTT (SRTT)</string>
+    <string name="label_jitter">Jitter (RFC 6298)</string>
+    <string name="label_bloat">Bufferbloat</string>
+    <string name="label_loss">Packet Loss</string>
+    <string name="label_profile">Active Profile</string>
+    <string name="label_fec">XOR FEC (GF2)</string>
+    <string name="label_pacer">BG Pacer</string>
+    <string name="label_network">Network</string>
+
+    <string name="reasons_idle">No active controller signals yet</string>
+
+    <string name="section_usage">Foreground App Detection (Optional)</string>
+    <string name="usage_access_granted">Usage Access granted — JITER automatically adapts profile when switching apps.</string>
+    <string name="usage_access_missing">Usage Access not granted (fallback: Safe Balanced). Note: for sideloaded APKs on Android 13+, enable "Allow restricted settings" in App Info first.</string>
+    <string name="usage_access_grant">Grant Usage Access</string>
+    <string name="usage_access_manage">Manage Usage Access</string>
+
+    <string name="poc_footnote">Stage 2 PoC: Uses a diagnostic virtual TUN (10.77.0.0/24) so device internet stays unaffected until Stage 3 WireGuard/Relay forwarding is connected.</string>
+</resources>
