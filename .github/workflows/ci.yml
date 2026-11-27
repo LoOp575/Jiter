@@ -107,7 +107,14 @@ jobs:
 
       - name: Run Kotlin Engine & Config Unit Tests
         working-directory: android
-        run: gradle testDebugUnitTest --stacktrace
+        run: |
+          if ! gradle testDebugUnitTest --stacktrace > /tmp/gradle-test.log 2>&1; then
+            cat /tmp/gradle-test.log
+            ERR_SUMMARY=$(grep -E "(^e: |FAILED|Exception|AssertionError|Execution failed|Could not|Unresolved|error:|> Task :)" /tmp/gradle-test.log | tail -n 25 | tr '\n' ' ')
+            echo "::error::Gradle testDebugUnitTest failed: ${ERR_SUMMARY}"
+            exit 1
+          fi
+          cat /tmp/gradle-test.log
 
       - name: Assemble Debug APK (linking C + C++ + Rust into libjiter_native.so)
         working-directory: android
