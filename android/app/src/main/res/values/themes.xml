@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Jiter" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:colorBackground">@color/jiter_bg</item>
+        <item name="colorSurface">@color/jiter_surface</item>
+        <item name="colorPrimary">@color/jiter_green</item>
+        <item name="colorSecondary">@color/jiter_accent</item>
+        <item name="android:statusBarColor">@color/jiter_bg</item>
+        <item name="android:navigationBarColor">@color/jiter_bg</item>
+    </style>
+</resources>

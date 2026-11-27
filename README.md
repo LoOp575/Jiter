@@ -1,9 +1,9 @@
 # JITER
 ## Full Technical Blueprint v2.0
 
-**Platform:** Android (Client) + Edge Relay (Jakarta / Singapore)  
-**Status:** Blueprint v2.0 + Verified Python Core Engine & Simulation Lab (Stage 1 complete)  
-**Initial release:** No login, stateless client
+**Platform:** Android (Client: Kotlin + C++ + C + Rust) + Swappable Edge Relay (Jakarta / Singapore)  
+**Status:** Blueprint v2.0 + Stage 1 Python Lab + Stage 2 Polyglot Native Android PoC (C / C++ / Rust / Kotlin)  
+**Initial release:** No login, stateless client, runtime-swappable backend/relay config
 
 JITER is an Android network stability, low-latency, and privacy engine. Its primary interaction stays radically simple: **GO** starts a protected adaptive session and **STOP** ends it. While GO is active, JITER keeps an encrypted tunnel alive, monitors real-time link health via integer bitwise math, classifies active traffic (Game, Streaming, Download, Browser), and applies two-sided queue pacing and adaptive error recovery **without restarting the tunnel**.
 
@@ -151,32 +151,73 @@ Reproducible via `python3 test-lab/simulations/run_experiments.py` (simultaneous
 
 ---
 
-## 6. Repository Structure
+## 6. Polyglot Native Stack & Repository Structure
+
+| Language | Responsibility | Characteristics | Location |
+|---|---|---|---|
+| **C (C11)** | Network engine, zero-copy IPv4/UDP/TCP packet parsing, 8-byte FEC header framing, 64-bit GF(2) XOR kernel | Ultra-lightweight & fast, zero heap allocation | `engine-native/c/` |
+| **C++ (C++17)** | Network engine memory management (`PacketPool` slab allocator), 3-tier Strict Priority `TrafficScheduler`, anti-bufferbloat pacer, Android JNI bridge | High performance, flexible, bounded RAM (~384 KB pool) | `engine-native/cpp/`, `android/app/src/main/cpp/` |
+| **Rust (2021)** | Mathematical engine (Formulas #1, #2, #3), Hard Veto guardrails, hysteresis, `AdaptiveController`, versioned C-ABI FFI (`jiter_math_ffi.h`) | High performance & memory safety | `engine-rust/` |
+| **Kotlin** | Android UI, merged `JiterVpnService`, notifications, Usage Access detector, swappable `BackendConfigStore` & pluggable `EngineAdapter` | Native Android integration | `android/app/src/main/java/com/jiter/app/` |
 
 ```text
 Jiter/
-├── README.md                                 # Blueprint v2.0 (this document)
+├── README.md                                 # Blueprint v2.0 & Polyglot Architecture
 ├── .gitignore
+├── .github/
+│   └── workflows/
+│       └── ci.yml                            # CI: Python + C + C++ + Rust + Cross-compiled Android APK
 ├── docs/
 │   └── architecture/
 │       └── core-engine-spec.md               # Fixed-point, Veto, Hysteresis & XOR FEC wire spec
+├── scripts/
+│   └── build-rust-android.sh                 # Cross-compiles engine-rust -> libjiter_math.a (arm64-v8a, x86_64)
+├── engine-rust/                              # Rust Mathematical Engine + C-ABI FFI
+│   ├── Cargo.toml
+│   ├── include/jiter_math_ffi.h
+│   └── src/{lib,ewma,scoring,fec,controller,ffi}.rs
+├── engine-native/                            # C + C++ Native Network Engine
+│   ├── Makefile
+│   ├── c/{include/jiter_packet.h, src/jiter_packet.c}
+│   ├── cpp/{include/jiter_packet_pool.hpp, include/jiter_scheduler.hpp, src/jiter_scheduler.cpp}
+│   └── tests/test_native_engine.cpp
 ├── test-lab/
-│   └── simulations/
-│       ├── jiter_formulas.py                 # Reference Python implementation (#1, #2, #3 + Controller)
-│       ├── run_experiments.py                # Reproducible 4-experiment benchmark runner
-│       └── test_jiter_formulas.py            # Automated unit tests (12 invariants)
-├── android/                                  # [Stage 2 — Upcoming] Kotlin Android PoC (GO/STOP, VpnService, Engine)
-├── engine-rust/                              # [Stage 3 — Upcoming] Zero-copy packet scheduler & FEC in Rust
-└── relay/                                    # [Stage 3 — Upcoming] JKT/SG edge relay prototype
+│   └── simulations/                          # Python Reference Lab & 4 Experiments
+├── android/                                  # Kotlin Android App + NDK CMake JNI (libjiter_native.so)
+│   ├── app/src/main/cpp/{CMakeLists.txt, jiter_jni.cpp}
+│   └── app/src/main/java/com/jiter/app/
+│       ├── MainActivity.kt                   # GO/STOP UI, ID/EN switcher, live telemetry & Backend Settings
+│       ├── bridge/{EngineAdapter,NativeEngineBridge}.kt
+│       ├── config/{BackendConfig,BackendConfigStore,LanguageManager}.kt
+│       ├── relay/{RelayProtocol,RelayTunnelClient}.kt
+│       ├── engine/                           # Pure Kotlin fallback implementation
+│       ├── vpn/JiterVpnService.kt            # Live TUN data-plane pump + protected UDP relay client
+│       ├── context/AppContextDetector.kt
+│       ├── network/NetworkMonitor.kt
+│       ├── notification/StatusNotification.kt
+│       └── state/SessionStore.kt
+└── relay/                                    # Stage 3 JKT/SG Rust UDP Relay Edge (3-tier pacer + XOR FEC)
+    ├── Cargo.toml
+    ├── Dockerfile
+    ├── deploy/jiter-relay.service
+    ├── src/{lib,main,protocol,scheduler,session,server}.rs
+    └── tests/integration_relay.rs
 ```
 
-### Run the Stage 1 Verification Lab
+### Run Local Verification
 
 ```bash
-# Run all unit tests
-python3 -m unittest discover -s test-lab/simulations -p "test_*.py" -v
+# 1. C11 + C++17 Native Network Engine tests (gcc / g++)
+make -C engine-native clean test
 
-# Run all 4 reproducible network experiments
+# 2. Rust Mathematical Engine & C-ABI FFI tests (cargo)
+(cd engine-rust && cargo test)
+
+# 3. Stage 3 Rust Edge Relay Server & real UDP integration tests
+(cd relay && cargo test -- --nocapture)
+
+# 4. Python Reference Lab unit tests & 4 experiments
+python3 -m unittest discover -s test-lab/simulations -p "test_*.py" -v
 python3 test-lab/simulations/run_experiments.py
 ```
 
@@ -196,6 +237,6 @@ python3 test-lab/simulations/run_experiments.py
 | Stage | Deliverable | Status |
 |---|---|---|
 | **Stage 1: Blueprint & Math Lab** | Blueprint v2.0, Core Engine Spec, Python reference implementation (#1, #2, #3 + Closed-Loop Controller), unit tests, 4 experiments | **Done** |
-| **Stage 2: Android PoC (Kotlin)** | Gradle Android project (`minSdk 29`, `targetSdk 35`), GO/STOP UI, single `JiterVpnService`, notification indicator, Usage Access detector, Kotlin port of the 3 formulas + JUnit tests | Next |
-| **Stage 3: Tunnel & Relay PoC** | WireGuard/Noise encrypted transport + two-sided Priority Queue / Pacer / Adaptive XOR FEC between Android client and Jakarta/Singapore VPS relay | Planned |
-| **Stage 4: Rust Native Engine & Profiling** | Port packet loop to Rust FFI (avoiding Go+Rust dual runtime), benchmark APK ≤15 MB, RAM ≤60 MB PSS, battery & soak tests | Planned |
+| **Stage 2: Polyglot Native Android PoC** | Native **C** packet engine + **C++** slab `PacketPool` & `TrafficScheduler` + **Rust** math engine (`jiter_math_ffi.h`) linked into `libjiter_native.so` + **Kotlin** Android UI/VpnService/Notifications + **Swappable Backend Config** + **Bahasa Indonesia / English live language switcher** + GitHub Actions CI APK build | **Done** |
+| **Stage 3: Edge Relay & Live TUN Data-Plane** | Unified 16-byte JITER Wire Protocol v1 (`docs/architecture/relay-wire-protocol.md`) + **Rust JITER Relay Edge (`relay/`)** with RAM-only ephemeral sessions, downstream 3-tier strict-priority pacer, GF(2) XOR FEC recovery, Docker/systemd VPS deploy kit + Android protected UDP `RelayTunnelClient`, live TUN→C/C++→Relay pump, and Formula #1 Native-vs-Relay switching | **Done** |
+| **Stage 4: Noise_IK/WireGuard AEAD & Hardware Profiling** | Outer Noise_IK / WireGuard AEAD transport encryption wrapper (`FLAG_ENCRYPTED`), release ARM64 benchmarking (APK ≤15 MB, RAM ≤60 MB PSS, battery drain, Wi-Fi ↔ 4G/5G soak tests, DNS/IPv6 leak tests) | Next |
