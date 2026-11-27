@@ -22,7 +22,8 @@ import com.jiter.app.relay.RelayTunnelClient
 import com.jiter.app.relay.ReplayWindow
 import com.jiter.app.relay.SessionCipher
 import com.jiter.app.relay.WireHeader
-import com.sun.net.httpserver.HttpServer
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -34,6 +35,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -1019,51 +1021,93 @@ class JiterEngineTest {
     @Test
     fun stage5ControlPlaneClientParsesBootstrapAndAppliesConfigOverLocalHttp() {
         val capturedAppKey = AtomicReference<String?>("")
-        val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        server.createContext("/api/v1/session/bootstrap") { exchange ->
-            exchange.requestBody.use { it.readBytes() }
-            capturedAppKey.set(exchange.requestHeaders.getFirst("X-Jiter-App-Key"))
-            val body = """
+        val capturedRequestLine = AtomicReference<String?>("")
+        val bodyBytes = """
+            {
+              "ok": true,
+              "source": "supabase",
+              "ttlSeconds": 300,
+              "policy": {
+                "tunnelScope": "FULL_INTERNET_TUNNEL",
+                "routingMode": "PRIVACY_ALWAYS_TUNNEL",
+                "failurePolicy": "FAIL_OPEN",
+                "fecPolicy": "AUTO_ADAPTIVE",
+                "probeHost": "1.1.1.1",
+                "probePort": 443
+              },
+              "nodes": [
                 {
-                  "ok": true,
-                  "source": "supabase",
-                  "ttlSeconds": 300,
-                  "policy": {
-                    "tunnelScope": "FULL_INTERNET_TUNNEL",
-                    "routingMode": "PRIVACY_ALWAYS_TUNNEL",
-                    "failurePolicy": "FAIL_OPEN",
-                    "fecPolicy": "AUTO_ADAPTIVE",
-                    "probeHost": "1.1.1.1",
-                    "probePort": 443
-                  },
-                  "nodes": [
-                    {
-                      "id": "jkt-1",
-                      "region": "JKT-1",
-                      "host": "203.0.113.10",
-                      "port": 51820,
-                      "psk": "auto-distributed-psk-jkt",
-                      "priority": 1
-                    },
-                    {
-                      "id": "sg-1",
-                      "region": "SG-1",
-                      "host": "198.51.100.20",
-                      "port": 51820,
-                      "psk": "auto-distributed-psk-sg",
-                      "priority": 2
-                    }
-                  ]
+                  "id": "jkt-1",
+                  "region": "JKT-1",
+                  "host": "203.0.113.10",
+                  "port": 51820,
+                  "psk": "auto-distributed-psk-jkt",
+                  "priority": 1
+                },
+                {
+                  "id": "sg-1",
+                  "region": "SG-1",
+                  "host": "198.51.100.20",
+                  "port": 51820,
+                  "psk": "auto-distributed-psk-sg",
+                  "priority": 2
                 }
-            """.trimIndent().toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders.add("Content-Type", "application/json")
-            exchange.sendResponseHeaders(200, body.size.toLong())
-            exchange.responseBody.use { it.write(body) }
+              ]
+            }
+        """.trimIndent().toByteArray(Charsets.UTF_8)
+
+        val serverSocket = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
+        val serverThread = Thread({
+            try {
+                serverSocket.accept().use { client ->
+                    client.soTimeout = 2_000
+                    val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
+                    capturedRequestLine.set(reader.readLine())
+                    var contentLength = 0
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.isEmpty()) break
+                        val colon = line.indexOf(':')
+                        if (colon > 0) {
+                            val name = line.substring(0, colon).trim()
+                            val value = line.substring(colon + 1).trim()
+                            if (name.equals("X-Jiter-App-Key", ignoreCase = true)) {
+                                capturedAppKey.set(value)
+                            } else if (name.equals("Content-Length", ignoreCase = true)) {
+                                contentLength = value.toIntOrNull() ?: 0
+                            }
+                        }
+                    }
+                    if (contentLength > 0) {
+                        val reqBuf = CharArray(contentLength)
+                        var read = 0
+                        while (read < contentLength) {
+                            val n = reader.read(reqBuf, read, contentLength - read)
+                            if (n <= 0) break
+                            read += n
+                        }
+                    }
+                    val headers = (
+                        "HTTP/1.1 200 OK\r\n" +
+                            "Content-Type: application/json\r\n" +
+                            "Content-Length: ${bodyBytes.size}\r\n" +
+                            "Connection: close\r\n\r\n"
+                        ).toByteArray(Charsets.US_ASCII)
+                    val out = client.getOutputStream()
+                    out.write(headers)
+                    out.write(bodyBytes)
+                    out.flush()
+                }
+            } catch (_: Exception) {
+                // Socket closed during teardown
+            }
+        }, "test-control-plane-http").apply {
+            isDaemon = true
+            start()
         }
-        server.start()
 
         try {
-            val baseUrl = "http://127.0.0.1:${server.address.port}"
+            val baseUrl = "http://127.0.0.1:${serverSocket.localPort}"
             val result = requireNotNull(
                 ControlPlaneClient.bootstrap(
                     baseUrl = baseUrl,
@@ -1073,6 +1117,7 @@ class JiterEngineTest {
                     appVersion = "0.6.0-stage5-onetap",
                 ),
             )
+            assertEquals("POST /api/v1/session/bootstrap HTTP/1.1", capturedRequestLine.get())
             assertEquals("dev-secret-app-key", capturedAppKey.get())
             assertEquals("supabase", result.source)
             assertEquals(2, result.nodes.size)
@@ -1091,7 +1136,8 @@ class JiterEngineTest {
             assertEquals(TunnelScope.FULL_INTERNET_TUNNEL, effective.tunnelScope)
             assertEquals(RoutingMode.PRIVACY_ALWAYS_TUNNEL, effective.routingMode)
         } finally {
-            server.stop(0)
+            serverSocket.close()
+            serverThread.join(1_000L)
         }
     }
 }
