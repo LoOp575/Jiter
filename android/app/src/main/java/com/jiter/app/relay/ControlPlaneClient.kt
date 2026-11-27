@@ -5,7 +5,6 @@ import com.jiter.app.config.FailurePolicy
 import com.jiter.app.config.FecPolicy
 import com.jiter.app.config.RoutingMode
 import com.jiter.app.config.TunnelScope
-import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
@@ -43,8 +42,8 @@ data class BootstrapResult(
  * Stage 5 Zero-Config Developer Control Plane Client.
  *
  * Calls `POST <controlPlaneUrl>/api/v1/session/bootstrap` using built-in `HttpURLConnection`
- * + `org.json` (zero extra APK dependencies) so regular users never have to enter VPS IPs,
- * ports, or PSK credentials manually.
+ * and a self-contained pure-Kotlin RFC 8259 JSON parser (zero external APK dependencies and
+ * zero `android.jar` `org.json` stub conflicts during JVM unit tests).
  */
 object ControlPlaneClient {
 
@@ -80,11 +79,13 @@ object ControlPlaneClient {
                 }
             }
 
-            val reqJson = JSONObject().apply {
-                put("appVersion", appVersion)
-                put("preferredRegion", preferredRegion)
-                put("networkType", networkType)
-            }.toString()
+            val reqJson = buildString {
+                append('{')
+                append("\"appVersion\":\"").append(escapeJson(appVersion)).append("\",")
+                append("\"preferredRegion\":\"").append(escapeJson(preferredRegion)).append("\",")
+                append("\"networkType\":\"").append(escapeJson(networkType)).append("\"")
+                append('}')
+            }
 
             OutputStreamWriter(conn.outputStream, Charsets.UTF_8).use { writer ->
                 writer.write(reqJson)
@@ -108,60 +109,58 @@ object ControlPlaneClient {
 
     internal fun parseBootstrapJson(rawJson: String): BootstrapResult? {
         return try {
-            val root = JSONObject(rawJson)
-            if (!root.optBoolean("ok", false)) return null
+            val root = MiniJsonParser(rawJson).parseValue() as? Map<*, *> ?: return null
+            if (root["ok"] != true) return null
 
-            val policyObj = root.optJSONObject("policy") ?: JSONObject()
+            val policyMap = root["policy"] as? Map<*, *> ?: emptyMap<String, Any?>()
             val policy = BootstrapPolicy(
                 tunnelScope = parseEnum(
-                    policyObj.optString("tunnelScope", ""),
+                    asString(policyMap["tunnelScope"]),
                     TunnelScope.FULL_INTERNET_TUNNEL,
                 ),
                 routingMode = parseEnum(
-                    policyObj.optString("routingMode", ""),
+                    asString(policyMap["routingMode"]),
                     RoutingMode.HYBRID_ADAPTIVE,
                 ),
                 failurePolicy = parseEnum(
-                    policyObj.optString("failurePolicy", ""),
+                    asString(policyMap["failurePolicy"]),
                     FailurePolicy.FAIL_OPEN,
                 ),
                 fecPolicy = parseEnum(
-                    policyObj.optString("fecPolicy", ""),
+                    asString(policyMap["fecPolicy"]),
                     FecPolicy.AUTO_ADAPTIVE,
                 ),
-                probeHost = policyObj.optString("probeHost", BackendConfig.DEFAULT_PROBE_HOST)
+                probeHost = asString(policyMap["probeHost"])
                     .trim()
                     .ifEmpty { BackendConfig.DEFAULT_PROBE_HOST },
-                probePort = policyObj.optInt("probePort", BackendConfig.DEFAULT_PROBE_PORT)
+                probePort = asInt(policyMap["probePort"], BackendConfig.DEFAULT_PROBE_PORT)
                     .coerceIn(1, 65535),
             )
 
-            val nodesArr = root.optJSONArray("nodes")
+            val rawNodes = root["nodes"] as? List<*> ?: emptyList<Any?>()
             val nodes = ArrayList<BootstrapRelayNode>()
-            if (nodesArr != null) {
-                for (i in 0 until nodesArr.length()) {
-                    val obj = nodesArr.optJSONObject(i) ?: continue
-                    val host = obj.optString("host", "").trim()
-                    val port = obj.optInt("port", BackendConfig.DEFAULT_RELAY_PORT)
-                    if (host.isEmpty() || port !in 1..65535) continue
-                    nodes.add(
-                        BootstrapRelayNode(
-                            id = obj.optString("id", "edge-$i").trim().ifEmpty { "edge-$i" },
-                            region = obj.optString("region", "EDGE").trim().ifEmpty { "EDGE" },
-                            host = host,
-                            port = port,
-                            psk = obj.optString("psk", "").trim(),
-                            priority = obj.optInt("priority", i + 1),
-                        ),
-                    )
-                }
+            rawNodes.forEachIndexed { idx, item ->
+                val obj = item as? Map<*, *> ?: return@forEachIndexed
+                val host = asString(obj["host"]).trim()
+                val port = asInt(obj["port"], BackendConfig.DEFAULT_RELAY_PORT)
+                if (host.isEmpty() || port !in 1..65535) return@forEachIndexed
+                nodes.add(
+                    BootstrapRelayNode(
+                        id = asString(obj["id"]).trim().ifEmpty { "edge-$idx" },
+                        region = asString(obj["region"]).trim().ifEmpty { "EDGE" },
+                        host = host,
+                        port = port,
+                        psk = asString(obj["psk"]).trim(),
+                        priority = asInt(obj["priority"], idx + 1),
+                    ),
+                )
             }
 
             BootstrapResult(
                 nodes = nodes,
                 policy = policy,
-                ttlSeconds = root.optInt("ttlSeconds", 300).coerceIn(30, 3600),
-                source = root.optString("source", "remote"),
+                ttlSeconds = asInt(root["ttlSeconds"], 300).coerceIn(30, 3600),
+                source = asString(root["source"]).ifEmpty { "remote" },
             )
         } catch (_: Exception) {
             null
@@ -243,8 +242,163 @@ object ControlPlaneClient {
         ).sanitized()
     }
 
+    private fun escapeJson(raw: String): String = buildString(raw.length) {
+        for (ch in raw) {
+            when (ch) {
+                '\\' -> append("\\\\")
+                '"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                else -> append(ch)
+            }
+        }
+    }
+
+    private fun asString(value: Any?): String = (value as? String) ?: ""
+
+    private fun asInt(value: Any?, fallback: Int): Int = when (value) {
+        is Number -> value.toInt()
+        is String -> value.trim().toIntOrNull() ?: fallback
+        else -> fallback
+    }
+
     private inline fun <reified T : Enum<T>> parseEnum(raw: String, fallback: T): T {
         if (raw.isBlank()) return fallback
         return enumValues<T>().firstOrNull { it.name == raw } ?: fallback
+    }
+}
+
+/**
+ * Minimal, dependency-free RFC 8259 JSON parser (objects, arrays, strings, numbers, booleans, null).
+ */
+private class MiniJsonParser(private val src: String) {
+    private var pos = 0
+
+    fun parseValue(): Any? {
+        skipWs()
+        if (pos >= src.length) error("Unexpected EOF")
+        return when (src[pos]) {
+            '{' -> parseObject()
+            '[' -> parseArray()
+            '"' -> parseString()
+            't' -> expectLiteral("true", true)
+            'f' -> expectLiteral("false", false)
+            'n' -> expectLiteral("null", null)
+            '-', in '0'..'9' -> parseNumber()
+            else -> error("Unexpected char '${src[pos]}' at $pos")
+        }
+    }
+
+    private fun parseObject(): Map<String, Any?> {
+        pos++ // '{'
+        val map = LinkedHashMap<String, Any?>()
+        skipWs()
+        if (pos < src.length && src[pos] == '}') {
+            pos++
+            return map
+        }
+        while (true) {
+            skipWs()
+            if (pos >= src.length || src[pos] != '"') error("Expected string key at $pos")
+            val key = parseString()
+            skipWs()
+            if (pos >= src.length || src[pos] != ':') error("Expected ':' at $pos")
+            pos++
+            map[key] = parseValue()
+            skipWs()
+            if (pos >= src.length) error("Unterminated object")
+            when (src[pos]) {
+                ',' -> pos++
+                '}' -> {
+                    pos++
+                    return map
+                }
+                else -> error("Expected ',' or '}' at $pos")
+            }
+        }
+    }
+
+    private fun parseArray(): List<Any?> {
+        pos++ // '['
+        val list = ArrayList<Any?>()
+        skipWs()
+        if (pos < src.length && src[pos] == ']') {
+            pos++
+            return list
+        }
+        while (true) {
+            list.add(parseValue())
+            skipWs()
+            if (pos >= src.length) error("Unterminated array")
+            when (src[pos]) {
+                ',' -> pos++
+                ']' -> {
+                    pos++
+                    return list
+                }
+                else -> error("Expected ',' or ']' at $pos")
+            }
+        }
+    }
+
+    private fun parseString(): String {
+        pos++ // '"'
+        val sb = StringBuilder()
+        while (pos < src.length) {
+            val ch = src[pos++]
+            when (ch) {
+                '"' -> return sb.toString()
+                '\\' -> {
+                    if (pos >= src.length) error("Unterminated escape")
+                    when (val esc = src[pos++]) {
+                        '"', '\\', '/' -> sb.append(esc)
+                        'b' -> sb.append('\b')
+                        'f' -> sb.append('\u000C')
+                        'n' -> sb.append('\n')
+                        'r' -> sb.append('\r')
+                        't' -> sb.append('\t')
+                        'u' -> {
+                            val hex = src.substring(pos, pos + 4)
+                            sb.append(hex.toInt(16).toChar())
+                            pos += 4
+                        }
+                        else -> sb.append(esc)
+                    }
+                }
+                else -> sb.append(ch)
+            }
+        }
+        error("Unterminated string")
+    }
+
+    private fun parseNumber(): Number {
+        val start = pos
+        if (src[pos] == '-') pos++
+        while (pos < src.length && src[pos] in '0'..'9') pos++
+        var isFloat = false
+        if (pos < src.length && src[pos] == '.') {
+            isFloat = true
+            pos++
+            while (pos < src.length && src[pos] in '0'..'9') pos++
+        }
+        if (pos < src.length && (src[pos] == 'e' || src[pos] == 'E')) {
+            isFloat = true
+            pos++
+            if (pos < src.length && (src[pos] == '+' || src[pos] == '-')) pos++
+            while (pos < src.length && src[pos] in '0'..'9') pos++
+        }
+        val token = src.substring(start, pos)
+        return if (isFloat) token.toDouble() else token.toLong()
+    }
+
+    private fun <T> expectLiteral(lit: String, value: T): T {
+        if (!src.startsWith(lit, pos)) error("Expected $lit at $pos")
+        pos += lit.length
+        return value
+    }
+
+    private fun skipWs() {
+        while (pos < src.length && src[pos] <= ' ') pos++
     }
 }

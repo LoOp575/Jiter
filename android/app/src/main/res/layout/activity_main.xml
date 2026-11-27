@@ -79,8 +79,8 @@
             android:textColor="@color/jiter_bg"
             android:textSize="32sp"
             android:textStyle="bold"
-            app:cornerRadius="86dp"
-            app:elevation="6dp" />
+            android:elevation="6dp"
+            app:cornerRadius="86dp" />
 
         <!-- Human-friendly single status line -->
         <TextView

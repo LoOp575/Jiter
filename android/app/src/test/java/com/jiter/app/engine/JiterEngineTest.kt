@@ -1021,6 +1021,7 @@ class JiterEngineTest {
         val capturedAppKey = AtomicReference<String?>("")
         val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
         server.createContext("/api/v1/session/bootstrap") { exchange ->
+            exchange.requestBody.use { it.readBytes() }
             capturedAppKey.set(exchange.requestHeaders.getFirst("X-Jiter-App-Key"))
             val body = """
                 {

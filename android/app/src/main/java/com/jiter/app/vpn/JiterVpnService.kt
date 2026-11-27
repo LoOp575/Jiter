@@ -529,8 +529,9 @@ class JiterVpnService : VpnService() {
             //   2. Live TUN packet/UID activity (zero Usage Access permission needed!)
             //   3. Optional UsageStats foreground app detector
             //   4. Safe Balanced standby
+            val overrideNow = manualProfileOverride
             val (effectiveProfile, detectionSource) = when {
-                manualProfileOverride != null -> manualProfileOverride!! to "Manual"
+                overrideNow != null -> overrideNow to "Manual"
                 packetAssessment.detectedFromPackets -> packetAssessment.profile to "Packet UID"
                 usageDetected.hasUsagePermission && usageDetected.profile != TrafficProfile.SAFE_BALANCED ->
                     usageDetected.profile to "App Usage"
