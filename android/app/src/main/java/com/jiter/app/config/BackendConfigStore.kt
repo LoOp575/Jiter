@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 object BackendConfigStore {
     private const val PREFS_NAME = "jiter_backend_config"
     private const val KEY_CONTROL_URL = "control_plane_url"
+    private const val KEY_CONTROL_APP_KEY = "control_plane_app_key"
     private const val KEY_RELAY_HOST = "relay_host"
     private const val KEY_RELAY_PORT = "relay_port"
     private const val KEY_RELAY_PSK = "relay_psk"
@@ -46,6 +47,7 @@ object BackendConfigStore {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit()
             .putString(KEY_CONTROL_URL, clean.controlPlaneUrl)
+            .putString(KEY_CONTROL_APP_KEY, clean.controlPlaneAppKey)
             .putString(KEY_RELAY_HOST, clean.relayHost)
             .putInt(KEY_RELAY_PORT, clean.relayPort)
             .putString(KEY_RELAY_PSK, clean.relayPsk)
@@ -69,6 +71,10 @@ object BackendConfigStore {
         return BackendConfig(
             controlPlaneUrl = prefs.getString(KEY_CONTROL_URL, BackendConfig.DEFAULT_CONTROL_PLANE_URL)
                 ?: BackendConfig.DEFAULT_CONTROL_PLANE_URL,
+            controlPlaneAppKey = prefs.getString(
+                KEY_CONTROL_APP_KEY,
+                BackendConfig.DEFAULT_CONTROL_PLANE_APP_KEY,
+            ) ?: BackendConfig.DEFAULT_CONTROL_PLANE_APP_KEY,
             relayHost = prefs.getString(KEY_RELAY_HOST, BackendConfig.DEFAULT_RELAY_HOST)
                 ?: BackendConfig.DEFAULT_RELAY_HOST,
             relayPort = prefs.getInt(KEY_RELAY_PORT, BackendConfig.DEFAULT_RELAY_PORT),

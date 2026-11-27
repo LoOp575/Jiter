@@ -1,5 +1,7 @@
 package com.jiter.app.config
 
+import com.jiter.app.BuildConfig
+
 enum class RoutingMode(val label: String) {
     PRIVACY_ALWAYS_TUNNEL("Privacy (Always Tunnel)"),
     HYBRID_ADAPTIVE("Hybrid (Native vs Relay)"),
@@ -33,6 +35,7 @@ enum class EngineRuntimePreference(val label: String) {
  */
 data class BackendConfig(
     val controlPlaneUrl: String = DEFAULT_CONTROL_PLANE_URL,
+    val controlPlaneAppKey: String = DEFAULT_CONTROL_PLANE_APP_KEY,
     val relayHost: String = DEFAULT_RELAY_HOST,
     val relayPort: Int = DEFAULT_RELAY_PORT,
     val relayPsk: String = DEFAULT_RELAY_PSK,
@@ -46,6 +49,7 @@ data class BackendConfig(
 ) {
     fun sanitized(): BackendConfig {
         val cleanControl = controlPlaneUrl.trim()
+        val cleanAppKey = controlPlaneAppKey.trim()
         val cleanRelayHost = relayHost.trim()
         val cleanPsk = relayPsk.trim()
         val cleanProbeHost = probeHost.trim().ifEmpty { DEFAULT_PROBE_HOST }
@@ -53,6 +57,7 @@ data class BackendConfig(
         val cleanProbePort = probePort.coerceIn(1, 65535)
         return copy(
             controlPlaneUrl = cleanControl,
+            controlPlaneAppKey = cleanAppKey,
             relayHost = cleanRelayHost,
             relayPort = cleanRelayPort,
             relayPsk = cleanPsk,
@@ -61,23 +66,28 @@ data class BackendConfig(
         )
     }
 
+    fun hasControlPlane(): Boolean = controlPlaneUrl.isNotBlank()
+
     fun hasCustomRelay(): Boolean = relayHost.isNotBlank()
 
     fun hasRelayPsk(): Boolean = relayPsk.isNotBlank()
 
     fun summaryLabel(): String = buildString {
-        if (hasCustomRelay()) {
-            append("Relay: $relayHost:$relayPort")
-            if (hasRelayPsk()) append(" [AEAD]")
-        } else {
-            append("Probe: $probeHost:$probePort")
+        when {
+            hasCustomRelay() -> {
+                append("Relay: $relayHost:$relayPort")
+                if (hasRelayPsk()) append(" [AEAD]")
+            }
+            hasControlPlane() -> append("Auto Control Plane")
+            else -> append("Probe: $probeHost:$probePort")
         }
         append(" · ")
         append(if (tunnelScope == TunnelScope.FULL_INTERNET_TUNNEL) "Full TUN" else "Diag TUN")
     }
 
     companion object {
-        const val DEFAULT_CONTROL_PLANE_URL = ""
+        val DEFAULT_CONTROL_PLANE_URL: String = BuildConfig.DEFAULT_CONTROL_PLANE_URL
+        val DEFAULT_CONTROL_PLANE_APP_KEY: String = BuildConfig.DEFAULT_CONTROL_PLANE_APP_KEY
         const val DEFAULT_RELAY_HOST = ""
         const val DEFAULT_RELAY_PORT = 51820
         const val DEFAULT_RELAY_PSK = ""

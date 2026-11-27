@@ -1,10 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">JITER</string>
-    <string name="app_subtitle">C / C++ / Rust / Kotlin Adaptive Low-Latency Engine</string>
+    <string name="app_subtitle">Automatic Low-Latency Network Protection</string>
 
     <string name="action_go">GO</string>
     <string name="action_stop">STOP</string>
+    <string name="action_close">Close</string>
     <string name="lang_switch_id">ID</string>
     <string name="lang_switch_en">EN</string>
     <string name="lang_label_system">System Default</string>
@@ -12,53 +13,62 @@
     <string name="lang_label_en">English</string>
     <string name="cfg_language_label">App Language</string>
 
+    <!-- Ultra-Minimalist Main Screen (Zero-Config One-Tap GO) -->
+    <string name="main_status_ready">Ready</string>
+    <string name="main_status_connecting">Connecting…</string>
+    <string name="main_status_active_ping_fmt">Active · %1$d ms</string>
+    <string name="main_status_active">Active</string>
+    <string name="main_status_degraded">Network Unstable</string>
+    <string name="main_status_error">Connection Error</string>
+
+    <string name="main_subtitle_idle">Tap GO — JITER automatically optimizes games &amp; streaming</string>
+    <string name="main_subtitle_connecting">Preparing optimal route automatically…</string>
+    <string name="main_subtitle_stable_encrypted_fmt">Stable · Encrypted (%1$s)</string>
+    <string name="main_subtitle_stable_local">Stable · Adaptive protection active</string>
+    <string name="main_subtitle_moderate">Stabilizing latency &amp; jitter…</string>
+    <string name="main_subtitle_degraded">Heavy network load — protecting priority traffic</string>
+    <string name="main_subtitle_offline">No internet connection detected</string>
+    <string name="main_footer_hint">Zero setup · Auto-adapts for Game, Streaming &amp; Download</string>
+
+    <!-- Auto-Detected Mode Badges -->
+    <string name="badge_mode_game">Auto · Game Mode</string>
+    <string name="badge_mode_game_streaming">Auto · Game + Streaming</string>
+    <string name="badge_mode_streaming">Auto · Streaming Mode</string>
+    <string name="badge_mode_download">Auto · Full-Speed Download</string>
+    <string name="badge_mode_balanced">Auto · Balanced</string>
+    <string name="badge_mode_manual_fmt">Developer Lock · %1$s</string>
+
+    <!-- Hidden Developer Console (5-Tap Logo) -->
+    <string name="dev_unlock_remaining_fmt">%1$d more taps for Developer Console</string>
+    <string name="dev_console_title">Developer Console &amp; Diagnostics</string>
+    <string name="dev_telemetry_title">Live Engine Telemetry (C / C++ / Rust / AEAD)</string>
+
     <string name="notification_channel_name">JITER Active Session</string>
-    <string name="notification_channel_desc">Shows live JITER tunnel state, probe RTT, jitter, and active profile.</string>
-    <string name="notif_summary_fmt">Probe RTT: %1$s · Jitter: %2$s · Loss: %3$s</string>
+    <string name="notification_channel_desc">Shows live JITER status, latency, and automatically detected mode.</string>
+    <string name="notif_title_active_fmt">JITER Active · %1$s · %2$s</string>
+    <string name="notif_title_connecting">JITER · Connecting…</string>
+    <string name="notif_summary_fmt">Ping: %1$s · Jitter: %2$s · Loss: %3$s</string>
     <string name="notif_detail_line2_fmt">Bufferbloat: %1$s · FEC: %2$s · BG Pacer: %3$d%%</string>
     <string name="notif_detail_line3_fmt">Net: %1$s · Route: %2$s</string>
 
-    <string name="section_profile">Adaptive Profile (No Tunnel Restart)</string>
+    <string name="section_profile">Developer Profile Override (No Tunnel Restart)</string>
     <string name="profile_auto">Auto</string>
     <string name="profile_game">Game</string>
     <string name="profile_streaming">Streaming</string>
     <string name="profile_download">Download</string>
 
-    <string name="label_probe_rtt">Probe RTT (SRTT)</string>
-    <string name="label_jitter">Jitter (RFC 6298)</string>
-    <string name="label_bloat">Bufferbloat</string>
-    <string name="label_loss">Packet Loss</string>
-    <string name="label_profile">Active Profile</string>
-    <string name="label_fec">XOR FEC (GF2)</string>
-    <string name="label_pacer">BG Pacer</string>
-    <string name="label_network">Network</string>
-
-    <string name="reasons_idle">No active controller signals yet</string>
-
-    <string name="status_idle">Idle — tap GO to start JITER session</string>
-    <string name="status_vpn_declined">VPN consent declined — session not started</string>
-    <string name="status_engine_prefix">Engine: %1$s</string>
-    <string name="status_engine_kotlin_selected">Kotlin Pure (Selected)</string>
-    <string name="status_engine_native_ready">Native (Rust + C++ + C) Ready</string>
-    <string name="status_engine_hybrid_ready">Hybrid (Kotlin Math + C/C++ Net) Ready</string>
-    <string name="status_engine_fallback">Kotlin Pure (Native .so unavailable)</string>
-
-    <string name="section_backend">Backend &amp; Engine Control (Swappable)</string>
-    <string name="relay_status_unconfigured">Relay: Not configured · Direct Probe mode</string>
-    <string name="relay_status_standby_fmt">Relay: %1$s (Standby) · Route: %2$s · TX %3$d / RX %4$d</string>
-    <string name="relay_status_connected_fmt">Relay %1$s (%2$s) · %3$s · Route: %4$s\nTUN TX: %5$d · RX: %6$d · FEC Recov: %7$d</string>
-    <string name="relay_badge_aead_full">AEAD · Full TUN %1$s</string>
-    <string name="relay_badge_aead_diag">AEAD · Diag TUN</string>
-    <string name="relay_badge_plain">Plain Diag</string>
+    <string name="status_vpn_declined">VPN permission declined — tap GO to try again</string>
     <string name="action_configure_backend">Configure Backend / Relay</string>
-    <string name="dialog_backend_title">Backend, Engine &amp; Language</string>
+    <string name="dialog_backend_title">Developer Backend, Relay &amp; Engine</string>
     <string name="action_save">Save</string>
     <string name="action_reset">Reset Default</string>
     <string name="action_cancel">Cancel</string>
 
-    <string name="cfg_control_url_label">Control Plane API URL (Optional — Supabase / Vercel / Custom)</string>
-    <string name="cfg_control_url_hint">https://your-control-api.example.com</string>
-    <string name="cfg_relay_host_label">JITER Relay Host / IP (Jakarta / Singapore VPS)</string>
+    <string name="cfg_control_url_label">Control Plane API URL (Vercel / Supabase / Custom)</string>
+    <string name="cfg_control_url_hint">https://your-control-plane.vercel.app</string>
+    <string name="cfg_control_key_label">Control Plane App Key (Optional X-Jiter-App-Key)</string>
+    <string name="cfg_control_key_hint">Leave blank if public/unprotected</string>
+    <string name="cfg_relay_host_label">Manual Relay Host Override (Overrides Control Plane)</string>
     <string name="cfg_relay_host_hint">sg-relay.example.com</string>
     <string name="cfg_relay_port_label">Relay UDP Port</string>
     <string name="cfg_relay_psk_label">Relay Pre-Shared Key (Required for AEAD + Full Tunnel)</string>
@@ -71,11 +81,8 @@
     <string name="cfg_fec_policy_label">XOR FEC Policy (Formula #3)</string>
     <string name="cfg_engine_backend_label">Engine Runtime Backend</string>
 
-    <string name="section_usage">Foreground App Detection (Optional)</string>
-    <string name="usage_access_granted">Usage Access granted — JITER automatically adapts profile when switching apps.</string>
-    <string name="usage_access_missing">Usage Access not granted (fallback: Safe Balanced). Note: for sideloaded APKs on Android 13+, enable "Allow restricted settings" in App Info first.</string>
-    <string name="usage_access_grant">Grant Usage Access</string>
-    <string name="usage_access_manage">Manage Usage Access</string>
-
-    <string name="poc_footnote">Stage 4 Full AEAD Tunnel: Runs C packet parser, C++ slab PacketPool/Scheduler, and Rust math FFI inside libjiter_native.so, encrypted via ECDHE P-256 + PSK + ChaCha20-Poly1305 AEAD to the JITER Linux /dev/net/tun NAT Relay Edge with Android UID app classification.</string>
+    <string name="usage_access_granted">Optional Usage Access: Active (pre-packet app detection enabled).</string>
+    <string name="usage_access_missing">Optional Usage Access: Off (JITER still detects Games &amp; Streaming automatically from live packets).</string>
+    <string name="usage_access_grant">Usage Access</string>
+    <string name="usage_access_manage">Manage Access</string>
 </resources>

@@ -1,6 +1,7 @@
 package com.jiter.app.context
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.net.ConnectivityManager
 import android.os.Process
 import android.system.OsConstants
@@ -9,15 +10,16 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 
 /**
- * Stage 4 Android API 29+ App-UID Flow Classifier.
+ * Stage 5 Android API 29+ Zero-Config App-UID Flow Classifier.
  *
- * Uses `ConnectivityManager.getConnectionOwnerUid` to resolve the exact owning Android
- * package for outgoing IPv4 TCP/UDP packets read from the TUN interface, overriding
- * packet-size heuristics whenever the app belongs to a known Game, Streaming, or
- * Background Downloader tier.
+ * Resolves the exact owning Android app for outgoing IPv4 TCP/UDP packets read from
+ * the TUN interface (`ConnectivityManager.getConnectionOwnerUid`), then classifies by:
+ *   1. Official Android OS `ApplicationInfo.category` (`CATEGORY_GAME`, `CATEGORY_VIDEO`,
+ *      `CATEGORY_AUDIO`) and legacy `FLAG_IS_GAME` — automatically covers every new game
+ *      and media app from Play Store without manual allowlist maintenance!
+ *   2. Curated package-name fallback hints for sideloaded or uncategorized apps.
  *
- * Falls back cleanly to `-1` (C layer IPv4/port/DSCP classifier) on unknown apps or
- * OEM ROM restrictions.
+ * Returns `-1` for unrecognized apps so the C layer IPv4/port/DSCP classifier takes over.
  */
 class UidFlowClassifier(context: Context) {
     private val connectivityManager =
@@ -66,6 +68,7 @@ class UidFlowClassifier(context: Context) {
         }
     }
 
+    @Suppress("DEPRECATION")
     private fun resolveTierForUid(uid: Int): Int {
         synchronized(uidTierCache) {
             uidTierCache[uid]?.let { return it }
@@ -75,7 +78,38 @@ class UidFlowClassifier(context: Context) {
         } catch (_: Exception) {
             null
         }
-        val tier = classifyPackages(pkgs)
+
+        var osCategory = ApplicationInfo.CATEGORY_UNDEFINED
+        var legacyGameFlag = false
+        if (pkgs != null && pkgs.isNotEmpty()) {
+            for (pkg in pkgs) {
+                try {
+                    val info = packageManager.getApplicationInfo(pkg, 0)
+                    if (info.category == ApplicationInfo.CATEGORY_GAME) {
+                        osCategory = ApplicationInfo.CATEGORY_GAME
+                        break
+                    }
+                    if ((info.flags and ApplicationInfo.FLAG_IS_GAME) != 0) {
+                        legacyGameFlag = true
+                        break
+                    }
+                    if (osCategory == ApplicationInfo.CATEGORY_UNDEFINED &&
+                        (info.category == ApplicationInfo.CATEGORY_VIDEO ||
+                            info.category == ApplicationInfo.CATEGORY_AUDIO)
+                    ) {
+                        osCategory = info.category
+                    }
+                } catch (_: Exception) {
+                    // Package visibility may restrict some system apps; package hints still apply
+                }
+            }
+        }
+
+        val tier = classifyAppMetadata(
+            category = osCategory,
+            isLegacyGameFlag = legacyGameFlag,
+            packages = pkgs,
+        )
         synchronized(uidTierCache) {
             uidTierCache[uid] = tier
         }
@@ -89,6 +123,7 @@ class UidFlowClassifier(context: Context) {
             "pubg",
             "freefire",
             "mihoyo",
+            "hoyoverse",
             "genshin",
             "riotgames",
             "wildrift",
@@ -102,6 +137,8 @@ class UidFlowClassifier(context: Context) {
             "valorant",
             "honkai",
             "minecraft",
+            "levelinfinite",
+            "sgameglobal",
         )
 
         private val STREAMING_HINTS = listOf(
@@ -111,7 +148,9 @@ class UidFlowClassifier(context: Context) {
             "disney",
             "musically",
             "tiktok",
+            "ugc.trill",
             "bilibili",
+            "bstar",
             "vidio",
             "viu",
             "spotify",
@@ -123,10 +162,29 @@ class UidFlowClassifier(context: Context) {
             "android.vending",
             "providers.downloads",
             "adm.pro",
+            "dv.adm",
             "idm",
             "torrent",
             "google.android.gms",
         )
+
+        internal fun classifyAppMetadata(
+            category: Int,
+            isLegacyGameFlag: Boolean,
+            packages: Array<String>?,
+        ): Int {
+            // Layer 1: Official Android OS ApplicationInfo category
+            if (category == ApplicationInfo.CATEGORY_GAME || isLegacyGameFlag) {
+                return RelayProtocol.TIER_GAME
+            }
+            if (category == ApplicationInfo.CATEGORY_VIDEO ||
+                category == ApplicationInfo.CATEGORY_AUDIO
+            ) {
+                return RelayProtocol.TIER_STREAMING
+            }
+            // Layer 2: Curated fallback hints for sideloaded or uncategorized apps
+            return classifyPackages(packages)
+        }
 
         internal fun classifyPackages(packages: Array<String>?): Int {
             if (packages == null || packages.isEmpty()) return -1

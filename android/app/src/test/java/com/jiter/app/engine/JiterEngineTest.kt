@@ -1,5 +1,6 @@
 package com.jiter.app.engine
 
+import android.content.pm.ApplicationInfo
 import com.jiter.app.bridge.KotlinEngineAdapter
 import com.jiter.app.bridge.NativeEngineBridge
 import com.jiter.app.config.AppLanguage
@@ -7,7 +8,9 @@ import com.jiter.app.config.BackendConfig
 import com.jiter.app.config.LanguageManager
 import com.jiter.app.config.RoutingMode
 import com.jiter.app.config.TunnelScope
+import com.jiter.app.context.TrafficAutoProfileDetector
 import com.jiter.app.context.UidFlowClassifier
+import com.jiter.app.relay.ControlPlaneClient
 import com.jiter.app.relay.EncryptedHelloAckPayload
 import com.jiter.app.relay.EncryptedHelloReqPayload
 import com.jiter.app.relay.EphemeralP256KeyPair
@@ -19,6 +22,8 @@ import com.jiter.app.relay.RelayTunnelClient
 import com.jiter.app.relay.ReplayWindow
 import com.jiter.app.relay.SessionCipher
 import com.jiter.app.relay.WireHeader
+import java.io.BufferedReader
+import java.io.InputStreamReader
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -29,6 +34,8 @@ import org.junit.Test
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.util.Locale
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -911,5 +918,226 @@ class JiterEngineTest {
         assertEquals(TunnelScope.FULL_INTERNET_TUNNEL, cfg.tunnelScope)
         assertTrue(cfg.summaryLabel().contains("Full TUN"))
         assertTrue(cfg.summaryLabel().contains("AEAD"))
+    }
+
+    // ------------------------------------------------------------------------
+    // Stage 5: OS Category UID Detection, Packet Auto-Profile & Control Plane
+    // ------------------------------------------------------------------------
+
+    @Test
+    fun stage5UidFlowClassifierUsesAndroidOsCategoryAndLegacyGameFlag() {
+        // Brand-new Play Store game NOT in any hardcoded allowlist -> detected via CATEGORY_GAME!
+        assertEquals(
+            RelayProtocol.TIER_GAME,
+            UidFlowClassifier.classifyAppMetadata(
+                category = ApplicationInfo.CATEGORY_GAME,
+                isLegacyGameFlag = false,
+                packages = arrayOf("com.brandnew.indie.arena2026"),
+            ),
+        )
+        // Legacy game flag fallback
+        assertEquals(
+            RelayProtocol.TIER_GAME,
+            UidFlowClassifier.classifyAppMetadata(
+                category = ApplicationInfo.CATEGORY_UNDEFINED,
+                isLegacyGameFlag = true,
+                packages = arrayOf("com.old.game"),
+            ),
+        )
+        // Video / Audio OS category -> STREAMING
+        assertEquals(
+            RelayProtocol.TIER_STREAMING,
+            UidFlowClassifier.classifyAppMetadata(
+                category = ApplicationInfo.CATEGORY_VIDEO,
+                isLegacyGameFlag = false,
+                packages = arrayOf("com.newvideo.player"),
+            ),
+        )
+        assertEquals(
+            RelayProtocol.TIER_STREAMING,
+            UidFlowClassifier.classifyAppMetadata(
+                category = ApplicationInfo.CATEGORY_AUDIO,
+                isLegacyGameFlag = false,
+                packages = arrayOf("com.newmusic.stream"),
+            ),
+        )
+        // Uncategorized sideloaded game falls back to curated package hints
+        assertEquals(
+            RelayProtocol.TIER_GAME,
+            UidFlowClassifier.classifyAppMetadata(
+                category = ApplicationInfo.CATEGORY_UNDEFINED,
+                isLegacyGameFlag = false,
+                packages = arrayOf("com.mobile.legends"),
+            ),
+        )
+    }
+
+    @Test
+    fun stage5TrafficAutoProfileDetectorHandlesGameStreamingConcurrentAndStickyWindows() {
+        val detector = TrafficAutoProfileDetector(
+            gameStickyMs = 15_000L,
+            streamingStickyMs = 10_000L,
+            downloadStickyMs = 8_000L,
+            burstWindowMs = 3_000L,
+        )
+
+        // Initially idle -> Safe Balanced
+        val init = detector.evaluate(1_000L)
+        assertEquals(TrafficProfile.SAFE_BALANCED, init.profile)
+        assertFalse(init.detectedFromPackets)
+
+        // 1 UID-confirmed Game packet activates GAME immediately
+        detector.recordPacket(RelayProtocol.TIER_GAME, 96, uidMatched = true, nowMs = 2_000L)
+        val gameState = detector.evaluate(2_500L)
+        assertEquals(TrafficProfile.GAME, gameState.profile)
+        assertTrue(gameState.detectedFromPackets)
+        assertFalse(gameState.concurrentStreaming)
+
+        // Concurrent Streaming arrives while Game is still sticky (e.g. PiP YouTube during game)
+        detector.recordPacket(RelayProtocol.TIER_STREAMING, 1200, uidMatched = true, nowMs = 10_000L)
+        val concurrent = detector.evaluate(10_500L)
+        assertEquals(TrafficProfile.GAME, concurrent.profile)
+        assertTrue(concurrent.concurrentStreaming)
+
+        // After Game sticky window expires (> 2_000 + 15_000), transitions cleanly to STREAMING
+        val streamOnly = detector.evaluate(18_000L)
+        assertEquals(TrafficProfile.STREAMING, streamOnly.profile)
+        assertFalse(streamOnly.concurrentStreaming)
+
+        // After Streaming expires (> 10_000 + 10_000), heavy Background bulk triggers DOWNLOAD
+        for (i in 0 until 60) {
+            detector.recordPacket(RelayProtocol.TIER_BACKGROUND, 1300, uidMatched = false, nowMs = 22_000L + i * 10L)
+        }
+        val dl = detector.evaluate(23_000L)
+        assertEquals(TrafficProfile.DOWNLOAD, dl.profile)
+        assertNotNull(dl.observedGoodputMbps)
+
+        // After Download window goes quiet -> returns to SAFE_BALANCED
+        val idleAgain = detector.evaluate(35_000L)
+        assertEquals(TrafficProfile.SAFE_BALANCED, idleAgain.profile)
+        assertFalse(idleAgain.detectedFromPackets)
+    }
+
+    @Test
+    fun stage5ControlPlaneClientParsesBootstrapAndAppliesConfigOverLocalHttp() {
+        val capturedAppKey = AtomicReference<String?>("")
+        val capturedRequestLine = AtomicReference<String?>("")
+        val bodyBytes = """
+            {
+              "ok": true,
+              "source": "supabase",
+              "ttlSeconds": 300,
+              "policy": {
+                "tunnelScope": "FULL_INTERNET_TUNNEL",
+                "routingMode": "PRIVACY_ALWAYS_TUNNEL",
+                "failurePolicy": "FAIL_OPEN",
+                "fecPolicy": "AUTO_ADAPTIVE",
+                "probeHost": "1.1.1.1",
+                "probePort": 443
+              },
+              "nodes": [
+                {
+                  "id": "jkt-1",
+                  "region": "JKT-1",
+                  "host": "203.0.113.10",
+                  "port": 51820,
+                  "psk": "auto-distributed-psk-jkt",
+                  "priority": 1
+                },
+                {
+                  "id": "sg-1",
+                  "region": "SG-1",
+                  "host": "198.51.100.20",
+                  "port": 51820,
+                  "psk": "auto-distributed-psk-sg",
+                  "priority": 2
+                }
+              ]
+            }
+        """.trimIndent().toByteArray(Charsets.UTF_8)
+
+        val serverSocket = ServerSocket(0, 4, InetAddress.getByName("127.0.0.1"))
+        val serverThread = Thread({
+            try {
+                serverSocket.accept().use { client ->
+                    client.soTimeout = 2_000
+                    val reader = BufferedReader(InputStreamReader(client.getInputStream(), Charsets.UTF_8))
+                    capturedRequestLine.set(reader.readLine())
+                    var contentLength = 0
+                    while (true) {
+                        val line = reader.readLine() ?: break
+                        if (line.isEmpty()) break
+                        val colon = line.indexOf(':')
+                        if (colon > 0) {
+                            val name = line.substring(0, colon).trim()
+                            val value = line.substring(colon + 1).trim()
+                            if (name.equals("X-Jiter-App-Key", ignoreCase = true)) {
+                                capturedAppKey.set(value)
+                            } else if (name.equals("Content-Length", ignoreCase = true)) {
+                                contentLength = value.toIntOrNull() ?: 0
+                            }
+                        }
+                    }
+                    if (contentLength > 0) {
+                        val reqBuf = CharArray(contentLength)
+                        var read = 0
+                        while (read < contentLength) {
+                            val n = reader.read(reqBuf, read, contentLength - read)
+                            if (n <= 0) break
+                            read += n
+                        }
+                    }
+                    val headers = (
+                        "HTTP/1.1 200 OK\r\n" +
+                            "Content-Type: application/json\r\n" +
+                            "Content-Length: ${bodyBytes.size}\r\n" +
+                            "Connection: close\r\n\r\n"
+                        ).toByteArray(Charsets.US_ASCII)
+                    val out = client.getOutputStream()
+                    out.write(headers)
+                    out.write(bodyBytes)
+                    out.flush()
+                }
+            } catch (_: Exception) {
+                // Socket closed during teardown
+            }
+        }, "test-control-plane-http").apply {
+            isDaemon = true
+            start()
+        }
+
+        try {
+            val baseUrl = "http://127.0.0.1:${serverSocket.localPort}"
+            val result = requireNotNull(
+                ControlPlaneClient.bootstrap(
+                    baseUrl = baseUrl,
+                    appKey = "dev-secret-app-key",
+                    preferredRegion = "JKT",
+                    networkType = "Wi-Fi",
+                    appVersion = "0.6.0-stage5-onetap",
+                ),
+            )
+            assertEquals("POST /api/v1/session/bootstrap HTTP/1.1", capturedRequestLine.get())
+            assertEquals("dev-secret-app-key", capturedAppKey.get())
+            assertEquals("supabase", result.source)
+            assertEquals(2, result.nodes.size)
+            assertEquals("JKT-1", result.nodes[0].region)
+            assertEquals("203.0.113.10", result.nodes[0].host)
+            assertEquals(TunnelScope.FULL_INTERNET_TUNNEL, result.policy.tunnelScope)
+
+            val effective = ControlPlaneClient.applyToConfig(
+                base = BackendConfig(controlPlaneUrl = baseUrl),
+                node = result.nodes[0],
+                policy = result.policy,
+            )
+            assertEquals("203.0.113.10", effective.relayHost)
+            assertEquals(51820, effective.relayPort)
+            assertEquals("auto-distributed-psk-jkt", effective.relayPsk)
+            assertEquals(TunnelScope.FULL_INTERNET_TUNNEL, effective.tunnelScope)
+            assertEquals(RoutingMode.PRIVACY_ALWAYS_TUNNEL, effective.routingMode)
+        } finally {
+            serverSocket.close()
+            serverThread.join(1_000L)
+        }
     }
 }

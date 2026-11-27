@@ -1,9 +1,9 @@
 # JITER
 ## Full Technical Blueprint v2.0
 
-**Platform:** Android (Client: Kotlin + C++ + C + Rust) + Swappable Edge Relay (Jakarta / Singapore)  
-**Status:** Blueprint v2.0 + Stage 1 Python Lab + Stage 2 Polyglot Native Android + Stage 3 Edge Relay + **Stage 4 AEAD Full Tunnel & Linux `/dev/net/tun` NAT Gateway**  
-**Initial release:** No login, stateless client, runtime-swappable backend/relay/PSK config
+**Platform:** Android (Client: Kotlin + C++ + C + Rust) + Swappable Edge Relay (Jakarta / Singapore) + Zero-Config Control Plane (Vercel / Supabase / Node.js)  
+**Status:** Blueprint v2.0 + Stage 1–4 + **Stage 5 One-Tap GO UX, Packet-Driven Auto-Detection & Zero-Config Control Plane**  
+**Initial release:** No login, zero-config one-tap GO for users, developer-managed Control Plane & hidden 5-tap diagnostics console
 
 JITER is an Android network stability, low-latency, and privacy engine. Its primary interaction stays radically simple: **GO** starts a protected adaptive session and **STOP** ends it. While GO is active, JITER keeps an encrypted tunnel alive, monitors real-time link health via integer bitwise math, classifies active traffic (Game, Streaming, Download, Browser), and applies two-sided queue pacing and adaptive error recovery **without restarting the tunnel**.
 
@@ -187,16 +187,22 @@ Jiter/
 ├── android/                                  # Kotlin Android App + NDK CMake JNI (libjiter_native.so)
 │   ├── app/src/main/cpp/{CMakeLists.txt, jiter_jni.cpp}
 │   └── app/src/main/java/com/jiter/app/
-│       ├── MainActivity.kt                   # GO/STOP UI, ID/EN switcher, AEAD/Full Tunnel telemetry & Backend Settings
+│       ├── MainActivity.kt                   # One-Tap GO minimalist UI + 5-tap Hidden Developer Console
 │       ├── bridge/{EngineAdapter,NativeEngineBridge}.kt
 │       ├── config/{BackendConfig,BackendConfigStore,LanguageManager}.kt
-│       ├── relay/{RelayCrypto,RelayProtocol,RelayTunnelClient}.kt
+│       ├── relay/{ControlPlaneClient,RelayCrypto,RelayProtocol,RelayTunnelClient}.kt
 │       ├── engine/                           # Pure Kotlin fallback implementation
-│       ├── vpn/JiterVpnService.kt            # Full Internet TUN (0.0.0.0/0 + DNS/IPv6 shield) + UID pump + AEAD Relay
-│       ├── context/{AppContextDetector,UidFlowClassifier}.kt
+│       ├── vpn/JiterVpnService.kt            # Zero-config bootstrap + Full Internet TUN + Packet Auto-Profile + AEAD
+│       ├── context/{AppContextDetector,TrafficAutoProfileDetector,UidFlowClassifier}.kt
 │       ├── network/NetworkMonitor.kt
 │       ├── notification/StatusNotification.kt
 │       └── state/SessionStore.kt
+├── control-plane/                            # Stage 5 Zero-Config Control Plane (Vercel / Supabase / Node.js)
+│   ├── api/v1/{health.js, session/bootstrap.js}
+│   ├── lib/bootstrap-core.js
+│   ├── supabase/schema.sql
+│   ├── server.js
+│   └── test/bootstrap.test.js
 └── relay/                                    # Stage 4 JKT/SG Rust Edge Relay (AEAD + Linux /dev/net/tun NAT + XOR FEC)
     ├── Cargo.toml
     ├── Dockerfile
@@ -217,7 +223,10 @@ make -C engine-native clean test
 # 3. Stage 3 Rust Edge Relay Server & real UDP integration tests
 (cd relay && cargo test -- --nocapture)
 
-# 4. Python Reference Lab unit tests & 4 experiments
+# 4. Stage 5 Zero-Config Control Plane tests (Node.js >= 18)
+npm --prefix control-plane test
+
+# 5. Python Reference Lab unit tests & 4 experiments
 python3 -m unittest discover -s test-lab/simulations -p "test_*.py" -v
 python3 test-lab/simulations/run_experiments.py
 ```
@@ -241,4 +250,5 @@ python3 test-lab/simulations/run_experiments.py
 | **Stage 2: Polyglot Native Android PoC** | Native **C** packet engine + **C++** slab `PacketPool` & `TrafficScheduler` + **Rust** math engine (`jiter_math_ffi.h`) linked into `libjiter_native.so` + **Kotlin** Android UI/VpnService/Notifications + **Swappable Backend Config** + **Bahasa Indonesia / English live language switcher** + GitHub Actions CI APK build | **Done** |
 | **Stage 3: Edge Relay & Live TUN Data-Plane** | Unified 16-byte JITER Wire Protocol v1 (`docs/architecture/relay-wire-protocol.md`) + **Rust JITER Relay Edge (`relay/`)** with RAM-only ephemeral sessions, downstream 3-tier strict-priority pacer, GF(2) XOR FEC recovery, Docker/systemd VPS deploy kit + Android protected UDP `RelayTunnelClient`, live TUN→C/C++→Relay pump, and Formula #1 Native-vs-Relay switching | **Done** |
 | **Stage 4: AEAD Encryption, Linux `/dev/net/tun` NAT & Full Internet Tunnel** | Standard **ECDHE P-256 + PSK + HKDF-SHA256 + ChaCha20-Poly1305 AEAD + 64-pkt Anti-Replay** (`FLAG_ENCRYPTED`, verified byte-for-byte between Rust & Android JCA), real Linux `/dev/net/tun` + `TunIpPool` + NAT VPS setup (`relay/deploy/setup-vps.sh`), Android **Full Internet Tunnel (`0.0.0.0/0` + DNS `1.1.1.1`/`8.8.8.8` + IPv6 leak shield `::/0`)**, and API 29+ **UID App Flow Classifier** (`getConnectionOwnerUid`) | **Done** |
-| **Stage 5: Device Hardware Profiling & Release Hardening** | Real-device ARM64 release APK profiling (≤15 MB APK, ≤60 MB PSS RAM), Wi-Fi ↔ 4G/5G handoff soak tests, external DNS/IPv6 leak test validation, and optional multi-node Control Plane discovery | Next |
+| **Stage 5: One-Tap GO UX, Smart Packet Detection & Zero-Config Control Plane** | Ultra-minimalist **One-Tap GO** home screen (all diagnostics & swappable backend controls tucked inside a **5-tap Hidden Developer Console**), **Android OS `ApplicationInfo.category` UID + TUN Packet Auto-Profile Detector** with sticky windows (detects Game, Streaming, Game+Streaming, and Download automatically without Usage Access), and swappable **Control Plane (`control-plane/`)** ready for Vercel/Supabase/Node.js with automatic multi-node failover | **Done** |
+| **Stage 6: Device Hardware Profiling & Release Hardening** | Real-device ARM64 release APK profiling (≤15 MB APK, ≤60 MB PSS RAM), Wi-Fi ↔ 4G/5G handoff soak tests, external DNS/IPv6 leak test validation, and signed Play Store / sideload release bundle | Next |
