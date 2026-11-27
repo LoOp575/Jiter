@@ -7,9 +7,13 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import androidx.core.app.ServiceCompat
+import com.jiter.app.bridge.EngineAdapter
+import com.jiter.app.bridge.NativeEngineBridge
+import com.jiter.app.config.BackendConfig
+import com.jiter.app.config.BackendConfigStore
+import com.jiter.app.config.FecPolicy
 import com.jiter.app.context.AppContextDetector
-import com.jiter.app.engine.AdaptiveController
-import com.jiter.app.engine.BitwiseEwmaEstimator
+import com.jiter.app.engine.FecMode
 import com.jiter.app.engine.QualityState
 import com.jiter.app.engine.SessionSnapshot
 import com.jiter.app.engine.SessionState
@@ -28,12 +32,12 @@ import kotlinx.coroutines.launch
 
 /**
  * Single merged VpnService + Foreground Service owning TUN lifecycle,
- * network sensing, foreground-app profile detection, and the 3-formula engine.
+ * network sensing, foreground-app profile detection, and the pluggable
+ * Rust/C++/C/Kotlin core engine.
  *
- * Stage 2 PoC note: establishes a real Android TUN interface scoped to the
- * diagnostic virtual subnet (10.77.0.0/24) so VPN consent, TUN lifecycle,
- * foreground notification, and live telemetry can be verified on real Android
- * devices without blackholing internet traffic before the Stage 3 Relay exists.
+ * All backend/relay endpoints, probe hosts, and runtime engine preferences are
+ * loaded dynamically from `BackendConfigStore` so operators can swap backends
+ * without modifying or recompiling the app.
  */
 class JiterVpnService : VpnService() {
 
@@ -43,8 +47,8 @@ class JiterVpnService : VpnService() {
     private lateinit var networkMonitor: NetworkMonitor
     private lateinit var appContextDetector: AppContextDetector
 
-    private val ewma = BitwiseEwmaEstimator()
-    private val controller = AdaptiveController()
+    private val engineLock = Any()
+    private var engineAdapter: EngineAdapter? = null
 
     private var tunInterface: ParcelFileDescriptor? = null
     private var monitorJob: Job? = null
@@ -55,10 +59,18 @@ class JiterVpnService : VpnService() {
     @Volatile
     private var manualProfileOverride: TrafficProfile? = null
 
+    @Volatile
+    private var activeConfig: BackendConfig = BackendConfig()
+
     override fun onCreate() {
         super.onCreate()
+        activeConfig = BackendConfigStore.ensureLoaded(this)
         statusNotification = StatusNotification(this).apply { ensureChannel() }
-        networkMonitor = NetworkMonitor(this)
+        networkMonitor = NetworkMonitor(
+            context = this,
+            initialProbeHost = activeConfig.probeHost,
+            initialProbePort = activeConfig.probePort,
+        )
         appContextDetector = AppContextDetector(this)
     }
 
@@ -86,6 +98,10 @@ class JiterVpnService : VpnService() {
                 }
                 return START_STICKY
             }
+            ACTION_RELOAD_CONFIG -> {
+                applyBackendConfigLive(BackendConfigStore.ensureLoaded(this))
+                return START_STICKY
+            }
             ACTION_START, null -> {
                 val rawName = intent?.getStringExtra(EXTRA_PROFILE_NAME)
                 if (rawName != null) {
@@ -109,11 +125,48 @@ class JiterVpnService : VpnService() {
         super.onDestroy()
     }
 
+    private fun applyBackendConfigLive(newConfig: BackendConfig) {
+        val prevPref = activeConfig.enginePreference
+        val prevProbeHost = activeConfig.probeHost
+        val prevProbePort = activeConfig.probePort
+        activeConfig = newConfig
+        networkMonitor.updateProbeEndpoint(newConfig.probeHost, newConfig.probePort)
+
+        val engineLabel = synchronized(engineLock) {
+            if (isRunning && prevPref != newConfig.enginePreference) {
+                engineAdapter?.close()
+                engineAdapter = NativeEngineBridge.createAdapter(newConfig.enginePreference)
+            } else if (isRunning && (prevProbeHost != newConfig.probeHost || prevProbePort != newConfig.probePort)) {
+                engineAdapter?.resetBaseline(null)
+            }
+            engineAdapter?.engineLabel ?: newConfig.enginePreference.label
+        }
+
+        SessionStore.update { current ->
+            current.copy(
+                engineRuntimeLabel = engineLabel,
+                backendSummary = newConfig.summaryLabel(),
+            )
+        }
+        if (isRunning) {
+            statusNotification.updateIfAllowed(SessionStore.snapshot.value, force = true)
+        }
+    }
+
     private fun startSessionIdempotent() {
+        val cfg = BackendConfigStore.ensureLoaded(this)
+        activeConfig = cfg
+        networkMonitor.updateProbeEndpoint(cfg.probeHost, cfg.probePort)
+
         if (isRunning) {
             // Idempotent GO: do not spawn duplicate TUN or loops
             statusNotification.updateIfAllowed(SessionStore.snapshot.value, force = true)
             return
+        }
+
+        val adapter = synchronized(engineLock) {
+            engineAdapter?.close()
+            NativeEngineBridge.createAdapter(cfg.enginePreference).also { engineAdapter = it }
         }
 
         val startingSnapshot = SessionSnapshot(
@@ -122,7 +175,9 @@ class JiterVpnService : VpnService() {
             manualProfileOverride = manualProfileOverride,
             activeProfile = manualProfileOverride ?: TrafficProfile.SAFE_BALANCED,
             networkType = networkMonitor.getNetworkType(),
-            statusDetail = "Initializing TUN interface and sensors...",
+            engineRuntimeLabel = adapter.engineLabel,
+            backendSummary = cfg.summaryLabel(),
+            statusDetail = "Initializing TUN interface and ${adapter.engineLabel}...",
         )
         SessionStore.update { startingSnapshot }
         promoteToForeground(startingSnapshot)
@@ -140,19 +195,19 @@ class JiterVpnService : VpnService() {
 
         tunInterface = pfd
         isRunning = true
-        ewma.reset()
-        controller.reset()
 
         val activeInit = startingSnapshot.copy(
             sessionState = SessionState.ACTIVE,
-            statusDetail = "TUN active (Stage 2 PoC monitor · Relay wired in Stage 3)",
+            statusDetail = "TUN active · ${adapter.engineLabel}",
         )
         SessionStore.update { activeInit }
         statusNotification.updateIfAllowed(activeInit, force = true)
 
         networkMonitor.startObservingNetwork { newType ->
             // Separate Wi-Fi and mobile baselines cleanly when interface changes
-            ewma.resetBaseline(null)
+            synchronized(engineLock) {
+                engineAdapter?.resetBaseline(null)
+            }
             SessionStore.update { current ->
                 current.copy(
                     networkType = newType,
@@ -173,8 +228,8 @@ class JiterVpnService : VpnService() {
                 .setSession("JITER PoC")
                 .setMtu(1280)
                 .addAddress("10.77.0.2", 32)
-                // Diagnostic virtual subnet only in Stage 2 so device internet stays unaffected
-                // until the Stage 3 WireGuard/Noise relay forwarding path is integrated.
+                // Diagnostic virtual subnet only until Stage 3 full-tunnel WireGuard/Noise relay
+                // forwarding is connected, keeping normal device connectivity intact during testing.
                 .addRoute("10.77.0.0", 24)
                 .establish()
         } catch (_: Exception) {
@@ -184,35 +239,51 @@ class JiterVpnService : VpnService() {
 
     private suspend fun runClosedLoopMonitor() {
         while (serviceScope.isActive && isRunning) {
+            val cfg = activeConfig
             val sample = networkMonitor.runProbe(socketProtector = { sock -> protect(sock) })
-
-            if (sample.rttMs != null) {
-                ewma.update(sample.rttMs, sample.timestampMs)
-            }
 
             val detected = appContextDetector.detect()
             val effectiveProfile = manualProfileOverride ?: detected.profile
 
-            val decision = controller.step(
-                nowMs = sample.timestampMs,
-                profile = effectiveProfile,
-                ewma = ewma,
-                lossPct = sample.lossPct,
-                bandwidthMbps = sample.estimatedThroughputMbps,
-                alternateRouteMetrics = null, // Relay candidate probes plugged in Stage 3
-            )
+            val stepOut = synchronized(engineLock) {
+                val adapter = engineAdapter ?: return@synchronized null
+                if (sample.rttMs != null) {
+                    adapter.submitRtt(sample.rttMs, sample.timestampMs)
+                }
+                val res = adapter.step(
+                    nowMs = sample.timestampMs,
+                    profile = effectiveProfile,
+                    lossPct = sample.lossPct,
+                    bandwidthMbps = sample.estimatedThroughputMbps,
+                    alternateRoute = null, // Swappable relay candidate probes plugged in Stage 3
+                )
+                Pair(adapter.engineLabel, res)
+            } ?: break
+
+            val (runtimeLabel, engineOut) = stepOut
+            val baseDecision = engineOut.decision
+
+            // Apply explicit operator FEC policy override from BackendConfig
+            val effectiveFec = when (cfg.fecPolicy) {
+                FecPolicy.AUTO_ADAPTIVE -> baseDecision.fecMode
+                FecPolicy.FORCE_OFF -> FecMode.OFF
+                FecPolicy.FORCE_K2_LOW_LAT -> {
+                    if (effectiveProfile == TrafficProfile.GAME) FecMode.XOR_K2_INTERLEAVED
+                    else FecMode.OFF
+                }
+            }
 
             val sessionState = when {
                 sample.networkType == "Offline" -> SessionState.DEGRADED
-                decision.qualityState == QualityState.RED -> SessionState.DEGRADED
+                baseDecision.qualityState == QualityState.RED -> SessionState.DEGRADED
                 else -> SessionState.ACTIVE
             }
 
             val detail = buildString {
                 if (sample.networkType == "Offline") {
-                    append("No active internet connection")
+                    append("No active internet (${cfg.failurePolicy.label})")
                 } else if (!detected.hasUsagePermission && manualProfileOverride == null) {
-                    append("Usage Access not granted · using Safe Balanced")
+                    append("Usage Access off · Safe Balanced · ${cfg.routingMode.label}")
                 } else if (manualProfileOverride != null) {
                     append("Manual profile lock · tunnel uninterrupted")
                 } else {
@@ -222,24 +293,26 @@ class JiterVpnService : VpnService() {
 
             val updated = SessionSnapshot(
                 sessionState = sessionState,
-                qualityState = decision.qualityState,
-                qualityScore = decision.qualityScore,
-                srttMs = ewma.srttMs,
-                jitterMs = ewma.jitterMs,
-                bufferbloatMs = ewma.bufferbloatMs,
-                rtoMs = ewma.rtoMs,
+                qualityState = baseDecision.qualityState,
+                qualityScore = baseDecision.qualityScore,
+                srttMs = engineOut.srttMs,
+                jitterMs = engineOut.jitterMs,
+                bufferbloatMs = engineOut.bufferbloatMs,
+                rtoMs = engineOut.rtoMs,
                 lossPct = sample.lossPct,
                 estimatedThroughputMbps = sample.estimatedThroughputMbps,
                 activeProfile = effectiveProfile,
                 manualProfileOverride = manualProfileOverride,
                 foregroundPackage = detected.foregroundPackage,
                 networkType = sample.networkType,
-                fecMode = decision.fecMode,
-                bgPacerRatio = decision.bgPacerRatio,
-                selectedRoute = decision.selectedRoute,
+                fecMode = effectiveFec,
+                bgPacerRatio = baseDecision.bgPacerRatio,
+                selectedRoute = baseDecision.selectedRoute,
+                engineRuntimeLabel = runtimeLabel,
+                backendSummary = cfg.summaryLabel(),
                 lastSampleTimestampMs = SystemClock.elapsedRealtime(),
                 statusDetail = detail,
-                reasonCodes = decision.reasonCodes,
+                reasonCodes = baseDecision.reasonCodes,
             )
 
             SessionStore.update { updated }
@@ -247,7 +320,7 @@ class JiterVpnService : VpnService() {
 
             val nextDelayMs = computeAdaptiveProbeDelayMs(
                 screenInteractive = networkMonitor.isScreenInteractive(),
-                qualityState = decision.qualityState,
+                qualityState = baseDecision.qualityState,
             )
             delay(nextDelayMs)
         }
@@ -258,8 +331,7 @@ class JiterVpnService : VpnService() {
         qualityState: QualityState,
     ): Long {
         if (!screenInteractive) {
-            // Cellular radio battery backoff when screen is off
-            return 30_000L
+            return 30_000L // Cellular radio battery backoff when screen is off
         }
         return when (qualityState) {
             QualityState.GREEN -> 2_000L
@@ -300,8 +372,10 @@ class JiterVpnService : VpnService() {
         }
         tunInterface = null
 
-        ewma.reset()
-        controller.reset()
+        synchronized(engineLock) {
+            engineAdapter?.close()
+            engineAdapter = null
+        }
         manualProfileOverride = null
 
         // Stateless client: wipe all in-RAM session telemetry on STOP
@@ -318,6 +392,7 @@ class JiterVpnService : VpnService() {
         const val ACTION_START = "com.jiter.app.action.START"
         const val ACTION_STOP = "com.jiter.app.action.STOP"
         const val ACTION_SET_PROFILE_OVERRIDE = "com.jiter.app.action.SET_PROFILE_OVERRIDE"
+        const val ACTION_RELOAD_CONFIG = "com.jiter.app.action.RELOAD_CONFIG"
         const val EXTRA_PROFILE_NAME = "extra_profile_name"
     }
 }

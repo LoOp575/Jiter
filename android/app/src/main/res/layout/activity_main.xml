@@ -418,6 +418,58 @@
             </LinearLayout>
         </com.google.android.material.card.MaterialCardView>
 
+        <!-- Swappable Backend & Native Engine Control Card -->
+        <com.google.android.material.card.MaterialCardView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            app:cardBackgroundColor="@color/jiter_surface"
+            app:cardCornerRadius="18dp"
+            app:strokeColor="@color/jiter_stroke"
+            app:strokeWidth="1dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="16dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/section_backend"
+                    android:textColor="@color/jiter_text_primary"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvEngineStack"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:fontFamily="monospace"
+                    android:text="Engine: Native (Rust + C++ + C)"
+                    android:textColor="@color/jiter_accent"
+                    android:textSize="12sp" />
+
+                <TextView
+                    android:id="@+id/tvBackendSummary"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:textColor="@color/jiter_text_secondary"
+                    android:textSize="12sp" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btnBackendConfig"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="10dp"
+                    android:text="@string/action_configure_backend" />
+            </LinearLayout>
+        </com.google.android.material.card.MaterialCardView>
+
         <!-- Usage Access Card -->
         <com.google.android.material.card.MaterialCardView
             android:layout_width="match_parent"

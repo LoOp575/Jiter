@@ -12,9 +12,20 @@ android {
         minSdk = 29
         targetSdk = 35
         versionCode = 1
-        versionName = "0.2.0-poc"
+        versionName = "0.3.0-native-poc"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {

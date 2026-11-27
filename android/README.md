@@ -1,38 +1,33 @@
-# JITER Android PoC (Stage 2)
+# JITER Android PoC (Polyglot Native: Kotlin + C++ + C + Rust)
 
-Minimalist native Kotlin Android application (`minSdk 29`, `targetSdk 35`, package `com.jiter.app`) implementing:
+Native Android application (`minSdk 29`, `targetSdk 35`, package `com.jiter.app`) combining all four layers cleanly:
 
-- **GO / STOP** idempotent session lifecycle in a single merged `JiterVpnService` + Foreground Service (Android 14/15 `specialUse` compliant)
-- **Pure Kotlin Core Engine** (`com.jiter.app.engine`):
-  - `BitwiseEwmaEstimator` — Formula #2 (RFC 6298 scaled microsecond integer registers)
-  - `LinearCostScorer` + `ColorStateMachine` — Formula #1 + Hard Veto guardrails + anti-flicker hysteresis
-  - `InterleavedXorFecEncoder` / `InterleavedXorFecDecoder` — Formula #3 ($\text{GF}(2)$ XOR parity with interleaved stride & 8-byte wire framing)
-  - `AdaptiveController` — closed-loop coordinator
-- **Signature Vertical-Line Indicator (`|`):** Green/Yellow/Red in-app indicator + monochrome shape-coded status-bar icons + rich expanded notification with direct STOP action
-- **Foreground App Detection:** `AppContextDetector` via `UsageStatsManager` (never Accessibility Service) with safe `SafeBalanced` fallback and manual profile chips (`Auto` / `Game` / `Streaming` / `Download`) that switch policy **without restarting the tunnel**
-- **Battery-Safe Network Monitor:** Bounded probe RTT + rolling packet loss + passive `TrafficStats` throughput + 30 s screen-off cellular backoff
-
-> **Stage 2 PoC Safety Note:** `JiterVpnService` establishes a real Android TUN interface scoped to the diagnostic virtual subnet (`10.77.0.0/24`) so device internet stays unaffected while validating VPN consent, TUN lifecycle, notifications, and live scoring on physical phones prior to Stage 3 WireGuard/Noise relay forwarding.
+- **Kotlin (`com.jiter.app`):** Minimalist GO/STOP UI, signature vertical-line `|` indicator, single merged `JiterVpnService` + Foreground Service, monochrome/expanded notifications, `UsageStatsManager` foreground-app detector, and runtime-swappable `BackendConfigStore` (Control Plane URL, Relay Host/Port, Probe Host/Port, Routing Mode, Failure Policy, FEC Policy, Engine Runtime).
+- **C (`engine-native/c/`):** Zero-copy IPv4/UDP/TCP packet parser, traffic-tier classifier, 8-byte XOR FEC wire header pack/unpack, and 64-bit aligned GF(2) XOR kernel.
+- **C++ (`engine-native/cpp/`, `src/main/cpp/jiter_jni.cpp`):** Fixed-capacity slab `PacketPool` (~384 KB bounded RAM, zero heap allocations on hot path), 3-tier Strict Priority `TrafficScheduler` + anti-bufferbloat background pacer, and narrow JNI bridge.
+- **Rust (`engine-rust/`):** Memory-safe Formulas #1, #2, #3 + `AdaptiveController` linked into `libjiter_native.so` via C-ABI FFI (`jiter_math_ffi.h`), with automatic fallback to pure Kotlin math if built locally without Rust prebuilts.
 
 ## Build & Test
 
-### Option A — GitHub Actions (No Local Android Studio Required)
-Push or open a PR and download the compiled `jiter-stage2-poc-debug-apk` artifact from the **Actions** tab (`.github/workflows/ci.yml`).
+### Option A — GitHub Actions (Full C + C++ + Rust + Kotlin APK Automatically)
+Push or open a PR and download `jiter-native-polyglot-debug-apk` from the **Actions** tab (`.github/workflows/ci.yml`). It cross-compiles Rust (`arm64-v8a`, `x86_64`), links C + C++ + Rust into `libjiter_native.so`, runs all unit tests, and packages `app-debug.apk`.
 
-### Option B — Android Studio / Local Gradle
-1. Open the `android/` directory in Android Studio (JDK 17, Android SDK 35).
-2. Run unit tests:
+### Option B — Local Android Studio / CLI
+1. *(Optional, to enable native Rust math inside `libjiter_native.so`)*:
+   ```bash
+   rustup target add aarch64-linux-android x86_64-linux-android
+   ./scripts/build-rust-android.sh arm64-v8a,x86_64
+   ```
+   *(If skipped, CMake still builds the C + C++ network engine and the app automatically uses pure Kotlin math fallback).*
+2. Build & test Android app:
    ```bash
    cd android
-   gradle testDebugUnitTest
-   ```
-3. Build Debug APK:
-   ```bash
-   gradle assembleDebug
+   gradle testDebugUnitTest assembleDebug
    # Output: android/app/build/outputs/apk/debug/app-debug.apk
    ```
 
 ## Sideloading on Android 13–16
-If installing the APK manually outside Play Store, Android restricts Usage Access by default:
-1. Open **Settings → Apps → JITER → ⋮ (top right) → Allow restricted settings**.
+If installing manually outside Play Store:
+1. Open **Settings → Apps → JITER → ⋮ → Allow restricted settings**.
 2. Tap **Grant Usage Access** inside JITER and toggle it on.
+3. Tap **Configure Backend / Relay** anytime in JITER to swap Relay Host/Port, Control Plane URL, Probe Host, or Engine Backend without reinstalling.

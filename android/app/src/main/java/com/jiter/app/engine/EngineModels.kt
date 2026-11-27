@@ -105,6 +105,8 @@ data class SessionSnapshot(
     val fecMode: FecMode = FecMode.OFF,
     val bgPacerRatio: Double = 1.0,
     val selectedRoute: RouteChoice = RouteChoice.NATIVE,
+    val engineRuntimeLabel: String = "Auto (Rust + C++ + C)",
+    val backendSummary: String = "Probe: 1.1.1.1:443 · Hybrid",
     val lastSampleTimestampMs: Long? = null,
     val statusDetail: String = "Idle — tap GO to start JITER session",
     val reasonCodes: List<String> = emptyList(),

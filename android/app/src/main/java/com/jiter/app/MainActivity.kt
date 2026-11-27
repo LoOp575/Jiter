@@ -9,7 +9,11 @@ import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.view.LayoutInflater
 import android.view.View
+import android.widget.ArrayAdapter
+import android.widget.EditText
+import android.widget.Spinner
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
@@ -20,6 +24,14 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
+import com.jiter.app.bridge.NativeEngineBridge
+import com.jiter.app.config.BackendConfig
+import com.jiter.app.config.BackendConfigStore
+import com.jiter.app.config.EngineRuntimePreference
+import com.jiter.app.config.FailurePolicy
+import com.jiter.app.config.FecPolicy
+import com.jiter.app.config.RoutingMode
 import com.jiter.app.context.AppContextDetector
 import com.jiter.app.engine.QualityState
 import com.jiter.app.engine.SessionSnapshot
@@ -56,6 +68,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var chipStreaming: Chip
     private lateinit var chipDownload: Chip
 
+    private lateinit var tvEngineStack: TextView
+    private lateinit var tvBackendSummary: TextView
+    private lateinit var btnBackendConfig: MaterialButton
+
     private lateinit var tvUsageStatus: TextView
     private lateinit var btnUsageSettings: MaterialButton
 
@@ -79,7 +95,6 @@ class MainActivity : AppCompatActivity() {
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) {
-        // Proceed with VPN consent regardless of notification permission result
         requestVpnConsentAndStart()
     }
 
@@ -88,13 +103,21 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         appContextDetector = AppContextDetector(this)
+        BackendConfigStore.ensureLoaded(this)
         bindViews()
         setupListeners()
 
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                SessionStore.snapshot.collect { snapshot ->
-                    renderSnapshot(snapshot)
+                launch {
+                    SessionStore.snapshot.collect { snapshot ->
+                        renderSnapshot(snapshot)
+                    }
+                }
+                launch {
+                    BackendConfigStore.config.collect { cfg ->
+                        renderBackendCard(cfg, SessionStore.snapshot.value)
+                    }
                 }
             }
         }
@@ -128,6 +151,10 @@ class MainActivity : AppCompatActivity() {
         chipStreaming = findViewById(R.id.chipStreaming)
         chipDownload = findViewById(R.id.chipDownload)
 
+        tvEngineStack = findViewById(R.id.tvEngineStack)
+        tvBackendSummary = findViewById(R.id.tvBackendSummary)
+        btnBackendConfig = findViewById(R.id.btnBackendConfig)
+
         tvUsageStatus = findViewById(R.id.tvUsageStatus)
         btnUsageSettings = findViewById(R.id.btnUsageSettings)
     }
@@ -153,6 +180,10 @@ class MainActivity : AppCompatActivity() {
             sendProfileOverride(overrideProfile)
         }
 
+        btnBackendConfig.setOnClickListener {
+            showBackendConfigDialog()
+        }
+
         btnUsageSettings.setOnClickListener {
             val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
             try {
@@ -160,6 +191,96 @@ class MainActivity : AppCompatActivity() {
             } catch (_: Exception) {
                 startActivity(Intent(Settings.ACTION_SETTINGS))
             }
+        }
+    }
+
+    private fun showBackendConfigDialog() {
+        val current = BackendConfigStore.ensureLoaded(this)
+        val view = LayoutInflater.from(this).inflate(R.layout.dialog_backend_config, null)
+
+        val etControlUrl = view.findViewById<EditText>(R.id.etControlPlaneUrl)
+        val etRelayHost = view.findViewById<EditText>(R.id.etRelayHost)
+        val etRelayPort = view.findViewById<EditText>(R.id.etRelayPort)
+        val etProbeHost = view.findViewById<EditText>(R.id.etProbeHost)
+        val etProbePort = view.findViewById<EditText>(R.id.etProbePort)
+        val spRouting = view.findViewById<Spinner>(R.id.spinnerRoutingMode)
+        val spFailure = view.findViewById<Spinner>(R.id.spinnerFailurePolicy)
+        val spFec = view.findViewById<Spinner>(R.id.spinnerFecPolicy)
+        val spEngine = view.findViewById<Spinner>(R.id.spinnerEngineBackend)
+
+        etControlUrl.setText(current.controlPlaneUrl)
+        etRelayHost.setText(current.relayHost)
+        etRelayPort.setText(current.relayPort.toString())
+        etProbeHost.setText(current.probeHost)
+        etProbePort.setText(current.probePort.toString())
+
+        val routingItems = RoutingMode.entries
+        spRouting.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            routingItems.map { it.label },
+        )
+        spRouting.setSelection(routingItems.indexOf(current.routingMode).coerceAtLeast(0))
+
+        val failureItems = FailurePolicy.entries
+        spFailure.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            failureItems.map { it.label },
+        )
+        spFailure.setSelection(failureItems.indexOf(current.failurePolicy).coerceAtLeast(0))
+
+        val fecItems = FecPolicy.entries
+        spFec.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            fecItems.map { it.label },
+        )
+        spFec.setSelection(fecItems.indexOf(current.fecPolicy).coerceAtLeast(0))
+
+        val engineItems = EngineRuntimePreference.entries
+        spEngine.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            engineItems.map { it.label },
+        )
+        spEngine.setSelection(engineItems.indexOf(current.enginePreference).coerceAtLeast(0))
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle(R.string.dialog_backend_title)
+            .setView(view)
+            .setPositiveButton(R.string.action_save) { _, _ ->
+                val updated = BackendConfig(
+                    controlPlaneUrl = etControlUrl.text.toString(),
+                    relayHost = etRelayHost.text.toString(),
+                    relayPort = etRelayPort.text.toString().toIntOrNull()
+                        ?: BackendConfig.DEFAULT_RELAY_PORT,
+                    probeHost = etProbeHost.text.toString(),
+                    probePort = etProbePort.text.toString().toIntOrNull()
+                        ?: BackendConfig.DEFAULT_PROBE_PORT,
+                    routingMode = routingItems[spRouting.selectedItemPosition],
+                    failurePolicy = failureItems[spFailure.selectedItemPosition],
+                    fecPolicy = fecItems[spFec.selectedItemPosition],
+                    enginePreference = engineItems[spEngine.selectedItemPosition],
+                )
+                BackendConfigStore.save(this, updated)
+                notifyServiceConfigChanged()
+            }
+            .setNeutralButton(R.string.action_reset) { _, _ ->
+                BackendConfigStore.resetDefaults(this)
+                notifyServiceConfigChanged()
+            }
+            .setNegativeButton(R.string.action_cancel, null)
+            .show()
+    }
+
+    private fun notifyServiceConfigChanged() {
+        val state = SessionStore.snapshot.value.sessionState
+        if (isSessionActive(state)) {
+            val intent = Intent(this, JiterVpnService::class.java).apply {
+                action = JiterVpnService.ACTION_RELOAD_CONFIG
+            }
+            startService(intent)
         }
     }
 
@@ -235,6 +356,36 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun renderBackendCard(cfg: BackendConfig, snapshot: SessionSnapshot) {
+        val runtimeDisplay = if (isSessionActive(snapshot.sessionState)) {
+            snapshot.engineRuntimeLabel
+        } else {
+            detectAvailableRuntimeLabel(cfg.enginePreference)
+        }
+        tvEngineStack.text = "Engine: $runtimeDisplay"
+        tvBackendSummary.text = buildString {
+            append(cfg.summaryLabel())
+            append(" · ")
+            append(cfg.failurePolicy.label)
+            append(" · FEC: ")
+            append(cfg.fecPolicy.label)
+            if (cfg.controlPlaneUrl.isNotBlank()) {
+                append("\nAPI: ${cfg.controlPlaneUrl}")
+            }
+        }
+    }
+
+    private fun detectAvailableRuntimeLabel(pref: EngineRuntimePreference): String {
+        if (pref == EngineRuntimePreference.KOTLIN_PURE) return "Kotlin Pure (Selected)"
+        return when {
+            NativeEngineBridge.hasRustMathEngine && NativeEngineBridge.hasCPacketEngine ->
+                "Native (Rust + C++ + C) Ready"
+            NativeEngineBridge.hasCPacketEngine && NativeEngineBridge.hasCppScheduler ->
+                "Hybrid (Kotlin Math + C/C++ Net) Ready"
+            else -> "Kotlin Pure (Native .so unavailable)"
+        }
+    }
+
     private fun renderSnapshot(snapshot: SessionSnapshot) {
         val active = isSessionActive(snapshot.sessionState)
 
@@ -289,6 +440,8 @@ class MainActivity : AppCompatActivity() {
         } else {
             snapshot.reasonCodes.joinToString(" · ")
         }
+
+        renderBackendCard(BackendConfigStore.config.value, snapshot)
 
         updatingChipsProgrammatically = true
         when (snapshot.manualProfileOverride) {

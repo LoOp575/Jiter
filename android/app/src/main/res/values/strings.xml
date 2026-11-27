@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">JITER</string>
-    <string name="app_subtitle">Low-Latency Network Stability Engine (Stage 2 PoC)</string>
+    <string name="app_subtitle">C / C++ / Rust / Kotlin Adaptive Low-Latency Engine</string>
 
     <string name="action_go">GO</string>
     <string name="action_stop">STOP</string>
@@ -32,5 +32,24 @@
     <string name="usage_access_grant">Grant Usage Access</string>
     <string name="usage_access_manage">Manage Usage Access</string>
 
-    <string name="poc_footnote">Stage 2 PoC: Uses a diagnostic virtual TUN (10.77.0.0/24) so device internet stays unaffected until Stage 3 WireGuard/Relay forwarding is connected.</string>
+    <string name="section_backend">Backend &amp; Engine Control (Swappable)</string>
+    <string name="action_configure_backend">Configure Backend / Relay</string>
+    <string name="dialog_backend_title">Backend &amp; Engine Settings</string>
+    <string name="action_save">Save</string>
+    <string name="action_reset">Reset Default</string>
+    <string name="action_cancel">Cancel</string>
+
+    <string name="cfg_control_url_label">Control Plane API URL (Optional — Supabase / Vercel / Custom)</string>
+    <string name="cfg_control_url_hint">https://your-control-api.example.com</string>
+    <string name="cfg_relay_host_label">JITER Relay Host / IP (Jakarta / Singapore VPS)</string>
+    <string name="cfg_relay_host_hint">sg-relay.example.com</string>
+    <string name="cfg_relay_port_label">Relay UDP Port</string>
+    <string name="cfg_probe_host_label">Probe Endpoint Host (RTT Sensor)</string>
+    <string name="cfg_probe_port_label">Probe Endpoint Port</string>
+    <string name="cfg_routing_mode_label">Routing Mode</string>
+    <string name="cfg_failure_policy_label">Tunnel Failure Policy</string>
+    <string name="cfg_fec_policy_label">XOR FEC Policy (Formula #3)</string>
+    <string name="cfg_engine_backend_label">Engine Runtime Backend</string>
+
+    <string name="poc_footnote">Stage 2+ Native PoC: Links C packet parser, C++ slab PacketPool/Scheduler, and Rust math FFI inside libjiter_native.so with swappable backend config. Uses diagnostic TUN (10.77.0.0/24) until Stage 3 Relay forwarding is enabled.</string>
 </resources>

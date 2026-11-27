@@ -28,10 +28,27 @@ data class ProbeSample(
  */
 class NetworkMonitor(
     private val context: Context,
-    private val probeHost: String = DEFAULT_PROBE_HOST,
-    private val probePort: Int = DEFAULT_PROBE_PORT,
+    initialProbeHost: String = DEFAULT_PROBE_HOST,
+    initialProbePort: Int = DEFAULT_PROBE_PORT,
     private val probeTimeoutMs: Int = DEFAULT_PROBE_TIMEOUT_MS,
 ) {
+    @Volatile
+    private var probeHost: String = initialProbeHost
+
+    @Volatile
+    private var probePort: Int = initialProbePort
+
+    fun updateProbeEndpoint(host: String, port: Int) {
+        val cleanHost = host.trim().ifEmpty { DEFAULT_PROBE_HOST }
+        val cleanPort = port.coerceIn(1, 65535)
+        if (cleanHost != probeHost || cleanPort != probePort) {
+            probeHost = cleanHost
+            probePort = cleanPort
+            synchronized(recentProbes) {
+                recentProbes.clear()
+            }
+        }
+    }
     private val connectivityManager =
         context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
     private val powerManager =

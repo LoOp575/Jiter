@@ -1,5 +1,9 @@
 package com.jiter.app.engine
 
+import com.jiter.app.bridge.KotlinEngineAdapter
+import com.jiter.app.bridge.NativeEngineBridge
+import com.jiter.app.config.BackendConfig
+import com.jiter.app.config.RoutingMode
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -273,5 +277,44 @@ class JiterEngineTest {
         )
         assertEquals(FecMode.OFF, dec.fecMode)
         assertEquals(1.0, dec.bgPacerRatio, 1e-6)
+    }
+
+    // ------------------------------------------------------------------------
+    // Swappable BackendConfig & Pluggable EngineAdapter / Reason Flags
+    // ------------------------------------------------------------------------
+
+    @Test
+    fun backendConfigSanitizesPortsAndHostsCleanly() {
+        val raw = BackendConfig(
+            controlPlaneUrl = "  https://api.example.com/v1  ",
+            relayHost = "  sg-edge.jiter.net ",
+            relayPort = 99999,
+            probeHost = "   ",
+            probePort = 0,
+            routingMode = RoutingMode.PRIVACY_ALWAYS_TUNNEL,
+        )
+        val clean = raw.sanitized()
+        assertEquals("https://api.example.com/v1", clean.controlPlaneUrl)
+        assertEquals("sg-edge.jiter.net", clean.relayHost)
+        assertEquals(65535, clean.relayPort)
+        assertEquals(BackendConfig.DEFAULT_PROBE_HOST, clean.probeHost)
+        assertEquals(1, clean.probePort)
+        assertTrue(clean.hasCustomRelay())
+    }
+
+    @Test
+    fun kotlinEngineAdapterAndReasonFlagDecoderMatchContract() {
+        val adapter = KotlinEngineAdapter()
+        assertTrue(adapter.submitRtt(14.0, 1_000L))
+        assertTrue(adapter.submitRtt(15.0, 2_000L))
+        val out = adapter.step(2_500L, TrafficProfile.GAME, lossPct = 0.0, bandwidthMbps = 30.0)
+        assertEquals(QualityState.GREEN, out.decision.qualityState)
+        assertTrue((out.decision.qualityScore ?: 0.0) > 90.0)
+
+        val decoded = NativeEngineBridge.decodeReasonFlags((1 shl 1) or (1 shl 6) or (1 shl 9) or (1 shl 12))
+        assertTrue(decoded.contains("VETO_GAME_CRITICAL_LOSS"))
+        assertTrue(decoded.contains("PACER_THROTTLE_BG"))
+        assertTrue(decoded.contains("FEC_ACTIVE_K4"))
+        assertTrue(decoded.contains("ROUTE_SWITCH_TO_RELAY"))
     }
 }

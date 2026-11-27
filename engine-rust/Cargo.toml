@@ -1,0 +1,15 @@
+[package]
+name = "jiter-math"
+version = "0.2.0"
+edition = "2021"
+description = "JITER mathematical engine: Bitwise EWMA (RFC 6298), Linear Cost + Hard Veto, Interleaved XOR FEC, and Adaptive Controller"
+license = "MIT"
+
+[lib]
+name = "jiter_math"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1

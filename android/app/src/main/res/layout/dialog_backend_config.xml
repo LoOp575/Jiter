@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="20dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/cfg_control_url_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etControlPlaneUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/cfg_control_url_hint"
+            android:inputType="textUri"
+            android:singleLine="true" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/cfg_relay_host_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etRelayHost"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/cfg_relay_host_hint"
+            android:inputType="textNoSuggestions"
+            android:singleLine="true" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/cfg_relay_port_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etRelayPort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="51820"
+            android:inputType="number"
+            android:singleLine="true" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/cfg_probe_host_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etProbeHost"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="1.1.1.1"
+            android:inputType="textNoSuggestions"
+            android:singleLine="true" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/cfg_probe_port_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <EditText
+            android:id="@+id/etProbePort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="443"
+            android:inputType="number"
+            android:singleLine="true" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/cfg_routing_mode_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/spinnerRoutingMode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/cfg_failure_policy_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/spinnerFailurePolicy"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/cfg_fec_policy_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/spinnerFecPolicy"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="@string/cfg_engine_backend_label"
+            android:textColor="@color/jiter_text_secondary"
+            android:textSize="12sp" />
+
+        <Spinner
+            android:id="@+id/spinnerEngineBackend"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+</ScrollView>

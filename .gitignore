@@ -21,9 +21,11 @@ android/local.properties
 *.jks
 *.keystore
 
-# Rust
+# Rust & Native builds
 target/
 engine-rust/target/
+engine-native/build/
+android/app/src/main/cpp/prebuilt/
 **/*.rs.bk
 
 # IDE & OS
