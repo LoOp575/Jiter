@@ -143,6 +143,92 @@ int jiter_fec_unpack_header(const uint8_t* buf, size_t buf_len, JiterFecHeader* 
     return 1;
 }
 
+int jiter_wire_pack_header(const JiterWireHeader* hdr, uint8_t* out_buf, size_t buf_len) {
+    if (hdr == NULL || out_buf == NULL || buf_len < JITER_WIRE_HEADER_BYTES) {
+        return 0;
+    }
+    if (hdr->version != JITER_WIRE_VERSION ||
+        hdr->msg_type < JITER_MSG_PROBE_REQ ||
+        hdr->msg_type > JITER_MSG_CONTROL ||
+        hdr->traffic_tier > JITER_TIER_BACKGROUND ||
+        hdr->payload_len > 1440u) {
+        return 0;
+    }
+
+    out_buf[0] = JITER_WIRE_MAGIC_0;
+    out_buf[1] = JITER_WIRE_MAGIC_1;
+    out_buf[2] = (uint8_t)(((hdr->version & 0x0Fu) << 4) | (hdr->msg_type & 0x0Fu));
+    out_buf[3] = (uint8_t)(((hdr->traffic_tier & 0x03u) << 6) | (hdr->flags & 0x3Fu));
+
+    out_buf[4] = (uint8_t)((hdr->session_id >> 24) & 0xFFu);
+    out_buf[5] = (uint8_t)((hdr->session_id >> 16) & 0xFFu);
+    out_buf[6] = (uint8_t)((hdr->session_id >> 8) & 0xFFu);
+    out_buf[7] = (uint8_t)(hdr->session_id & 0xFFu);
+
+    out_buf[8] = (uint8_t)((hdr->sequence >> 24) & 0xFFu);
+    out_buf[9] = (uint8_t)((hdr->sequence >> 16) & 0xFFu);
+    out_buf[10] = (uint8_t)((hdr->sequence >> 8) & 0xFFu);
+    out_buf[11] = (uint8_t)(hdr->sequence & 0xFFu);
+
+    out_buf[12] = (uint8_t)((hdr->payload_len >> 8) & 0xFFu);
+    out_buf[13] = (uint8_t)(hdr->payload_len & 0xFFu);
+    out_buf[14] = hdr->pacer_q8;
+    out_buf[15] = hdr->fec_mode;
+    return 1;
+}
+
+int jiter_wire_unpack_header(const uint8_t* buf, size_t buf_len, JiterWireHeader* out_hdr) {
+    if (buf == NULL || out_hdr == NULL || buf_len < JITER_WIRE_HEADER_BYTES) {
+        return 0;
+    }
+    if (buf[0] != JITER_WIRE_MAGIC_0 || buf[1] != JITER_WIRE_MAGIC_1) {
+        return 0;
+    }
+
+    uint8_t version = (uint8_t)(buf[2] >> 4);
+    uint8_t msg_type = (uint8_t)(buf[2] & 0x0Fu);
+    uint8_t tier = (uint8_t)(buf[3] >> 6);
+    uint8_t flags = (uint8_t)(buf[3] & 0x3Fu);
+    uint16_t payload_len = read_be16(buf + 12);
+
+    if (version != JITER_WIRE_VERSION ||
+        msg_type < JITER_MSG_PROBE_REQ ||
+        msg_type > JITER_MSG_CONTROL ||
+        tier > JITER_TIER_BACKGROUND ||
+        payload_len > 1440u) {
+        return 0;
+    }
+
+    out_hdr->version = version;
+    out_hdr->msg_type = msg_type;
+    out_hdr->traffic_tier = tier;
+    out_hdr->flags = flags;
+    out_hdr->session_id = read_be32(buf + 4);
+    out_hdr->sequence = read_be32(buf + 8);
+    out_hdr->payload_len = payload_len;
+    out_hdr->pacer_q8 = buf[14];
+    out_hdr->fec_mode = buf[15];
+    return 1;
+}
+
+uint8_t jiter_pacer_ratio_to_q8(double ratio) {
+    if (ratio <= 0.0) {
+        return 0u;
+    }
+    if (ratio >= 1.0) {
+        return 255u;
+    }
+    double scaled = ratio * 255.0 + 0.5;
+    if (scaled >= 255.0) {
+        return 255u;
+    }
+    return (uint8_t)scaled;
+}
+
+double jiter_pacer_q8_to_ratio(uint8_t q8) {
+    return (double)q8 / 255.0;
+}
+
 void jiter_xor_accumulate(uint8_t* dst, const uint8_t* src, size_t len) {
     if (dst == NULL || src == NULL || len == 0u) {
         return;

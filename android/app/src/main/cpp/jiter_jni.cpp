@@ -299,4 +299,85 @@ Java_com_jiter_app_bridge_NativeEngineBridge_nativePoolStats(
     return JNI_TRUE;
 }
 
+JNIEXPORT jboolean JNICALL
+Java_com_jiter_app_bridge_NativeEngineBridge_nativeEnqueuePacket(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jbyteArray raw_packet,
+    jint length,
+    jlong now_ms,
+    jint tier_override
+) {
+    (void)thiz;
+    auto* ctx = from_handle(handle);
+    if (ctx == nullptr || raw_packet == nullptr || length <= 0) {
+        return JNI_FALSE;
+    }
+    const jsize arr_len = env->GetArrayLength(raw_packet);
+    if (length > arr_len) {
+        return JNI_FALSE;
+    }
+
+    jbyte* bytes = env->GetByteArrayElements(raw_packet, nullptr);
+    if (bytes == nullptr) {
+        return JNI_FALSE;
+    }
+
+    const bool ok = ctx->scheduler.enqueue(
+        reinterpret_cast<const uint8_t*>(bytes),
+        static_cast<size_t>(length),
+        static_cast<int64_t>(now_ms),
+        static_cast<int>(tier_override)
+    );
+    env->ReleaseByteArrayElements(raw_packet, bytes, JNI_ABORT);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_jiter_app_bridge_NativeEngineBridge_nativeDequeuePacket(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jlong now_ms,
+    jbyteArray out_buf,
+    jintArray out_tier_and_len
+) {
+    (void)thiz;
+    auto* ctx = from_handle(handle);
+    if (ctx == nullptr || out_buf == nullptr || out_tier_and_len == nullptr) {
+        return JNI_FALSE;
+    }
+    if (env->GetArrayLength(out_tier_and_len) < 2) {
+        return JNI_FALSE;
+    }
+
+    jiter::PacketSlot* slot = ctx->scheduler.dequeue(static_cast<int64_t>(now_ms));
+    if (slot == nullptr) {
+        return JNI_FALSE;
+    }
+
+    const jsize cap = env->GetArrayLength(out_buf);
+    const size_t copy_len = (slot->length <= static_cast<size_t>(cap))
+        ? slot->length
+        : static_cast<size_t>(cap);
+
+    if (copy_len > 0) {
+        env->SetByteArrayRegion(
+            out_buf,
+            0,
+            static_cast<jsize>(copy_len),
+            reinterpret_cast<const jbyte*>(slot->data)
+        );
+    }
+
+    jint meta_out[2] = {
+        static_cast<jint>(slot->meta.traffic_tier),
+        static_cast<jint>(copy_len),
+    };
+    env->SetIntArrayRegion(out_tier_and_len, 0, 2, meta_out);
+    ctx->pool.release(slot);
+    return JNI_TRUE;
+}
+
 } // extern "C"

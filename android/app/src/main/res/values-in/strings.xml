@@ -44,6 +44,9 @@
     <string name="status_engine_fallback">Kotlin Murni (Native .so tidak tersedia)</string>
 
     <string name="section_backend">Kontrol Backend &amp; Mesin (Bisa Diganti)</string>
+    <string name="relay_status_unconfigured">Relay: Belum diatur · Mode Probe Langsung</string>
+    <string name="relay_status_standby_fmt">Relay: %1$s (Siaga) · Rute: %2$s · TX %3$d / RX %4$d</string>
+    <string name="relay_status_connected_fmt">Relay %1$s · %2$s · Rute: %3$s\nTUN TX: %4$d · RX: %5$d · FEC Pulih: %6$d</string>
     <string name="action_configure_backend">Atur Backend / Relay / Bahasa</string>
     <string name="dialog_backend_title">Pengaturan Backend, Mesin &amp; Bahasa</string>
     <string name="action_save">Simpan</string>
@@ -68,5 +71,5 @@
     <string name="usage_access_grant">Beri Izin Akses Penggunaan</string>
     <string name="usage_access_manage">Kelola Akses Penggunaan</string>
 
-    <string name="poc_footnote">Stage 2 Native PoC: Menghubungkan C packet parser, C++ slab PacketPool/Scheduler, dan Rust math FFI dalam libjiter_native.so dengan backend yang bisa diganti. Menggunakan TUN diagnostik (10.77.0.0/24) sampai forwarding Relay Stage 3 diaktifkan.</string>
+    <string name="poc_footnote">Stage 3 Polyglot + Relay: Menjalankan C packet parser, C++ slab PacketPool/Scheduler, dan Rust math FFI dalam libjiter_native.so, terhubung ke JITER UDP Relay Edge (Rust) yang bisa diganti dengan pacer dua arah dan GF(2) XOR FEC.</string>
 </resources>

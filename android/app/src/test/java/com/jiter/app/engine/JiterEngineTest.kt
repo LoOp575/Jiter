@@ -6,13 +6,24 @@ import com.jiter.app.config.AppLanguage
 import com.jiter.app.config.BackendConfig
 import com.jiter.app.config.LanguageManager
 import com.jiter.app.config.RoutingMode
+import com.jiter.app.relay.RelayProtocol
+import com.jiter.app.relay.RelayTunnelClient
+import com.jiter.app.relay.WireHeader
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.util.Locale
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.abs
 
 class JiterEngineTest {
@@ -344,5 +355,180 @@ class JiterEngineTest {
             AppLanguage.INDONESIAN,
             LanguageManager.toggleIndonesianEnglish(AppLanguage.SYSTEM, "en"),
         )
+    }
+
+    // ------------------------------------------------------------------------
+    // Stage 3: Relay Wire Protocol v1, Local UDP Handshake/Probe & TUN Queue
+    // ------------------------------------------------------------------------
+
+    @Test
+    fun relayWireHeaderMatchesCAndRustGoldenBytes() {
+        val hdr = WireHeader(
+            version = RelayProtocol.WIRE_VERSION,
+            msgType = RelayProtocol.MSG_DATA_FEC,
+            trafficTier = RelayProtocol.TIER_GAME,
+            flags = RelayProtocol.FLAG_FEC_PARITY,
+            sessionId = 0x11223344,
+            sequence = 42,
+            payloadLen = 128,
+            pacerQ8 = RelayProtocol.pacerRatioToQ8(0.35),
+            fecMode = 2,
+        )
+        val packed = hdr.pack()
+        val expected = byteArrayOf(
+            0x4A, 0x54, 0x16, 0x02,
+            0x11, 0x22, 0x33, 0x44,
+            0x00, 0x00, 0x00, 0x2A,
+            0x00, 0x80.toByte(), 0x59, 0x02,
+        )
+        assertArrayEquals(expected, packed)
+        assertEquals(hdr, WireHeader.unpack(packed))
+
+        // Corrupt magic rejected
+        val bad = packed.copyOf()
+        bad[0] = 0x00
+        assertNull(WireHeader.unpack(bad))
+    }
+
+    @Test
+    fun kotlinAdapterPrioritizesGamePacketsAheadOfBackground() {
+        val adapter = KotlinEngineAdapter()
+        val bgTcp = ByteArray(1200).apply {
+            this[0] = 0x45 // IPv4
+            this[9] = 6 // TCP bulk -> BACKGROUND
+        }
+        val gameUdp = ByteArray(96).apply {
+            this[0] = 0x45 // IPv4
+            this[9] = 17 // Small UDP -> GAME
+        }
+        assertTrue(adapter.enqueueTunPacket(bgTcp, bgTcp.size, 1_000L))
+        assertTrue(adapter.enqueueTunPacket(gameUdp, gameUdp.size, 1_000L))
+
+        val outBuf = ByteArray(2048)
+        val outMeta = IntArray(2)
+        assertTrue(adapter.dequeueScheduledPacket(1_000L, outBuf, outMeta))
+        assertEquals(RelayProtocol.TIER_GAME, outMeta[0])
+        assertEquals(gameUdp.size, outMeta[1])
+
+        assertTrue(adapter.dequeueScheduledPacket(1_000L, outBuf, outMeta))
+        assertEquals(RelayProtocol.TIER_BACKGROUND, outMeta[0])
+        assertEquals(bgTcp.size, outMeta[1])
+    }
+
+    @Test
+    fun relayTunnelClientConnectProbeAndEchoOverLocalUdp() {
+        val serverSock = DatagramSocket(0, InetAddress.getByName("127.0.0.1"))
+        serverSock.soTimeout = 200
+        val stopServer = AtomicBoolean(false)
+        val gotGoodbye = CountDownLatch(1)
+
+        val serverThread = Thread({
+            val rx = ByteArray(2048)
+            val pkt = DatagramPacket(rx, rx.size)
+            while (!stopServer.get() && !serverSock.isClosed) {
+                try {
+                    pkt.length = rx.size
+                    serverSock.receive(pkt)
+                    val hdr = WireHeader.unpack(rx, pkt.length) ?: continue
+                    val payloadStart = RelayProtocol.WIRE_HEADER_BYTES
+                    when (hdr.msgType) {
+                        RelayProtocol.MSG_HELLO_REQ -> {
+                            val ackPayload = ByteArray(RelayProtocol.HELLO_ACK_BYTES)
+                            RelayProtocol.putU16(ackPayload, 0, 1280)
+                            RelayProtocol.putU16(ackPayload, 2, 0x03)
+                            "JKT-1".toByteArray(Charsets.UTF_8).copyInto(ackPayload, 4)
+                            val resp = WireHeader(
+                                msgType = RelayProtocol.MSG_HELLO_ACK,
+                                sessionId = hdr.sessionId,
+                                sequence = 1,
+                                payloadLen = ackPayload.size,
+                            ).frameBytes(ackPayload)
+                            serverSock.send(DatagramPacket(resp, resp.size, pkt.address, pkt.port))
+                        }
+                        RelayProtocol.MSG_PROBE_REQ -> {
+                            val txUs = RelayProtocol.getU64(rx, payloadStart)
+                            val respPayload = ByteArray(RelayProtocol.PROBE_RESP_BYTES)
+                            RelayProtocol.putU64(respPayload, 0, txUs)
+                            RelayProtocol.putU32(respPayload, 8, 50) // 0.50% loss
+                            RelayProtocol.putU32(respPayload, 12, 1_500) // 1.5ms queue
+                            RelayProtocol.putU32(respPayload, 16, 3) // 3 FEC recoveries
+                            RelayProtocol.putU16(respPayload, 20, hdr.pacerQ8)
+                            RelayProtocol.putU16(respPayload, 22, hdr.fecMode)
+                            val resp = WireHeader(
+                                msgType = RelayProtocol.MSG_PROBE_RESP,
+                                sessionId = hdr.sessionId,
+                                sequence = 2,
+                                payloadLen = respPayload.size,
+                            ).frameBytes(respPayload)
+                            serverSock.send(DatagramPacket(resp, resp.size, pkt.address, pkt.port))
+                        }
+                        RelayProtocol.MSG_DATA_PLAIN -> {
+                            val body = rx.copyOfRange(payloadStart, payloadStart + hdr.payloadLen)
+                            val resp = WireHeader(
+                                msgType = RelayProtocol.MSG_DATA_PLAIN,
+                                trafficTier = hdr.trafficTier,
+                                sessionId = hdr.sessionId,
+                                sequence = 3,
+                                payloadLen = body.size,
+                            ).frameBytes(body)
+                            serverSock.send(DatagramPacket(resp, resp.size, pkt.address, pkt.port))
+                        }
+                        RelayProtocol.MSG_CONTROL -> {
+                            if ((hdr.flags and RelayProtocol.FLAG_GOODBYE) != 0) {
+                                gotGoodbye.countDown()
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Timeout or closed
+                }
+            }
+        }, "test-mock-relay").apply { start() }
+
+        try {
+            val echoedPayload = AtomicReference<ByteArray?>(null)
+            val echoLatch = CountDownLatch(1)
+            val client = RelayTunnelClient(
+                onDownlinkPacket = { data ->
+                    echoedPayload.set(data)
+                    echoLatch.countDown()
+                },
+            )
+
+            val cfg = BackendConfig(
+                relayHost = "127.0.0.1",
+                relayPort = serverSock.localPort,
+            )
+            assertTrue(client.connect(cfg, TrafficProfile.GAME) { true })
+            assertTrue(client.isConnected)
+
+            val probe = client.probeRelay(TrafficProfile.GAME, FecMode.XOR_K2_INTERLEAVED, 0.35)
+            assertTrue(probe.reachable)
+            assertEquals("JKT-1", probe.relayRegion)
+            assertEquals(3L, probe.relayFecRecovered)
+            assertNotNull(probe.routeMetrics)
+            assertEquals(0.5, probe.routeMetrics!!.lossPct, 1e-6)
+
+            val samplePkt = "JITER_STAGE3_UDP_TEST".toByteArray(Charsets.UTF_8)
+            assertTrue(
+                client.sendDataPacket(
+                    trafficTier = RelayProtocol.TIER_STREAMING,
+                    rawIpv4 = samplePkt,
+                    length = samplePkt.size,
+                    fecMode = FecMode.OFF,
+                    bgPacerRatio = 0.5,
+                ),
+            )
+            assertTrue(echoLatch.await(1, TimeUnit.SECONDS))
+            assertArrayEquals(samplePkt, echoedPayload.get())
+
+            client.disconnect(sendGoodbye = true)
+            assertFalse(client.isConnected)
+            assertTrue(gotGoodbye.await(1, TimeUnit.SECONDS))
+        } finally {
+            stopServer.set(true)
+            serverSock.close()
+            serverThread.join(1_000L)
+        }
     }
 }

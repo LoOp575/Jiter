@@ -1,0 +1,20 @@
+[Unit]
+Description=JITER Edge Relay Server (RAM-only, Low-Latency Pacer + XOR FEC)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jiter
+Group=jiter
+ExecStart=/usr/local/bin/jiter-relay --bind 0.0.0.0:51820 --region JKT-1 --mode echo --max-link-mbps 50
+Restart=always
+RestartSec=2
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

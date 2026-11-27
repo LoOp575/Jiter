@@ -1,0 +1,22 @@
+[package]
+name = "jiter-relay"
+version = "0.3.0"
+edition = "2021"
+description = "JITER Stage 3 Edge Relay Server (Jakarta/Singapore) with 3-tier strict-priority pacer and GF(2) XOR FEC"
+license = "MIT"
+
+[dependencies]
+jiter-math = { path = "../engine-rust" }
+
+[lib]
+name = "jiter_relay"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jiter-relay"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

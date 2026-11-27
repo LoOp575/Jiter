@@ -107,6 +107,61 @@ static void test_c_packet_parser_and_fec_header() {
     std::printf("[PASS] C packet parser, FEC header framing, and 64-bit GF(2) XOR kernel\n");
 }
 
+static void test_c_relay_wire_header_golden_vector() {
+    // Golden interop vector matching docs/architecture/relay-wire-protocol.md
+    JiterWireHeader h_in{};
+    h_in.version = JITER_WIRE_VERSION;
+    h_in.msg_type = JITER_MSG_DATA_FEC;
+    h_in.traffic_tier = JITER_TIER_GAME;
+    h_in.flags = JITER_FLAG_FEC_PARITY;
+    h_in.session_id = 0x11223344u;
+    h_in.sequence = 42u;
+    h_in.payload_len = 128u;
+    h_in.pacer_q8 = jiter_pacer_ratio_to_q8(0.35);
+    h_in.fec_mode = 2u; // XOR_K2
+
+    uint8_t wire[JITER_WIRE_HEADER_BYTES]{};
+    assert(jiter_wire_pack_header(&h_in, wire, sizeof(wire)) == 1);
+
+    const uint8_t expected[JITER_WIRE_HEADER_BYTES] = {
+        0x4Au, 0x54u, 0x16u, 0x02u,
+        0x11u, 0x22u, 0x33u, 0x44u,
+        0x00u, 0x00u, 0x00u, 0x2Au,
+        0x00u, 0x80u, 0x59u, 0x02u,
+    };
+    assert(std::memcmp(wire, expected, sizeof(expected)) == 0);
+
+    JiterWireHeader h_out{};
+    assert(jiter_wire_unpack_header(wire, sizeof(wire), &h_out) == 1);
+    assert(h_out.version == h_in.version);
+    assert(h_out.msg_type == h_in.msg_type);
+    assert(h_out.traffic_tier == h_in.traffic_tier);
+    assert(h_out.flags == h_in.flags);
+    assert(h_out.session_id == h_in.session_id);
+    assert(h_out.sequence == h_in.sequence);
+    assert(h_out.payload_len == h_in.payload_len);
+    assert(h_out.pacer_q8 == 0x59u);
+    assert(h_out.fec_mode == 2u);
+
+    // Reject wrong magic & wrong version
+    uint8_t bad_magic[JITER_WIRE_HEADER_BYTES];
+    std::memcpy(bad_magic, wire, sizeof(wire));
+    bad_magic[0] = 0x00u;
+    assert(jiter_wire_unpack_header(bad_magic, sizeof(bad_magic), &h_out) == 0);
+
+    uint8_t bad_ver[JITER_WIRE_HEADER_BYTES];
+    std::memcpy(bad_ver, wire, sizeof(wire));
+    bad_ver[2] = 0x26u; // version 2
+    assert(jiter_wire_unpack_header(bad_ver, sizeof(bad_ver), &h_out) == 0);
+
+    // Pacer Q8 clamp & round-trip checks
+    assert(jiter_pacer_ratio_to_q8(-0.5) == 0u);
+    assert(jiter_pacer_ratio_to_q8(1.5) == 255u);
+    assert(jiter_pacer_q8_to_ratio(255u) == 1.0);
+
+    std::printf("[PASS] C 16-byte JITER Relay Wire Protocol v1 codec & golden vector\n");
+}
+
 static void test_cpp_packet_pool_and_scheduler() {
     jiter::PacketPool pool(8);
     std::vector<jiter::PacketSlot*> held;
@@ -168,6 +223,7 @@ static void test_cpp_packet_pool_and_scheduler() {
 
 int main() {
     test_c_packet_parser_and_fec_header();
+    test_c_relay_wire_header_golden_vector();
     test_cpp_packet_pool_and_scheduler();
     std::printf("ALL NATIVE C/C++ ENGINE TESTS PASSED!\n");
     return 0;

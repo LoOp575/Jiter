@@ -96,6 +96,20 @@ object NativeEngineBridge {
     external fun nativeConfigurePacer(handle: Long, bgPacerRatio: Double, estimatedLinkMbps: Double)
     external fun nativeClassifyIpv4Tier(rawPacket: ByteArray): Int
     external fun nativePoolStats(handle: Long, outStats: LongArray): Boolean
+    external fun nativeEnqueuePacket(
+        handle: Long,
+        rawPacket: ByteArray,
+        length: Int,
+        nowMs: Long,
+        tierOverride: Int,
+    ): Boolean
+
+    external fun nativeDequeuePacket(
+        handle: Long,
+        nowMs: Long,
+        outBuf: ByteArray,
+        outTierAndLen: IntArray,
+    ): Boolean
 
     internal fun decodeReasonFlags(flags: Int): List<String> {
         if (flags == 0) return emptyList()
@@ -237,6 +251,27 @@ private class NativeRustCppAdapter(
     }
 
     @Synchronized
+    override fun enqueueTunPacket(
+        rawPacket: ByteArray,
+        length: Int,
+        nowMs: Long,
+        tierOverride: Int,
+    ): Boolean {
+        if (handle == 0L) return false
+        return NativeEngineBridge.nativeEnqueuePacket(handle, rawPacket, length, nowMs, tierOverride)
+    }
+
+    @Synchronized
+    override fun dequeueScheduledPacket(
+        nowMs: Long,
+        outBuf: ByteArray,
+        outTierAndLen: IntArray,
+    ): Boolean {
+        if (handle == 0L) return false
+        return NativeEngineBridge.nativeDequeuePacket(handle, nowMs, outBuf, outTierAndLen)
+    }
+
+    @Synchronized
     override fun close() {
         if (handle != 0L) {
             NativeEngineBridge.nativeDestroySession(handle)
@@ -285,6 +320,27 @@ private class HybridNativePacketKotlinMathAdapter(
             )
         }
         return out
+    }
+
+    @Synchronized
+    override fun enqueueTunPacket(
+        rawPacket: ByteArray,
+        length: Int,
+        nowMs: Long,
+        tierOverride: Int,
+    ): Boolean {
+        if (handle == 0L) return false
+        return NativeEngineBridge.nativeEnqueuePacket(handle, rawPacket, length, nowMs, tierOverride)
+    }
+
+    @Synchronized
+    override fun dequeueScheduledPacket(
+        nowMs: Long,
+        outBuf: ByteArray,
+        outTierAndLen: IntArray,
+    ): Boolean {
+        if (handle == 0L) return false
+        return NativeEngineBridge.nativeDequeuePacket(handle, nowMs, outBuf, outTierAndLen)
     }
 
     @Synchronized

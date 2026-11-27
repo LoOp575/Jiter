@@ -492,6 +492,18 @@
                     android:textColor="@color/jiter_text_secondary"
                     android:textSize="12sp" />
 
+                <TextView
+                    android:id="@+id/tvRelayTelemetry"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="6dp"
+                    android:background="@color/jiter_surface_alt"
+                    android:fontFamily="monospace"
+                    android:padding="8dp"
+                    android:text="@string/relay_status_unconfigured"
+                    android:textColor="@color/jiter_text_secondary"
+                    android:textSize="11sp" />
+
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/btnBackendConfig"
                     style="@style/Widget.Material3.Button.TonalButton"

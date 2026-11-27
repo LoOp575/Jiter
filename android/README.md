@@ -2,10 +2,10 @@
 
 Native Android application (`minSdk 29`, `targetSdk 35`, package `com.jiter.app`) combining all four layers cleanly:
 
-- **Kotlin (`com.jiter.app`):** Minimalist GO/STOP UI, signature vertical-line `|` indicator, single merged `JiterVpnService` + Foreground Service, monochrome/expanded notifications, `UsageStatsManager` foreground-app detector, and runtime-swappable `BackendConfigStore` (Control Plane URL, Relay Host/Port, Probe Host/Port, Routing Mode, Failure Policy, FEC Policy, Engine Runtime).
-- **C (`engine-native/c/`):** Zero-copy IPv4/UDP/TCP packet parser, traffic-tier classifier, 8-byte XOR FEC wire header pack/unpack, and 64-bit aligned GF(2) XOR kernel.
-- **C++ (`engine-native/cpp/`, `src/main/cpp/jiter_jni.cpp`):** Fixed-capacity slab `PacketPool` (~384 KB bounded RAM, zero heap allocations on hot path), 3-tier Strict Priority `TrafficScheduler` + anti-bufferbloat background pacer, and narrow JNI bridge.
-- **Rust (`engine-rust/`):** Memory-safe Formulas #1, #2, #3 + `AdaptiveController` linked into `libjiter_native.so` via C-ABI FFI (`jiter_math_ffi.h`), with automatic fallback to pure Kotlin math if built locally without Rust prebuilts.
+- **Kotlin (`com.jiter.app`):** Minimalist GO/STOP UI with live Bahasa Indonesia / English switcher (`ID`/`EN`), signature vertical-line `|` indicator, single merged `JiterVpnService` + Foreground Service, protected UDP `RelayTunnelClient` (Stage 3 Wire Protocol v1), monochrome/expanded notifications, `UsageStatsManager` foreground-app detector, and runtime-swappable `BackendConfigStore` (Control Plane URL, Relay Host/Port, Probe Host/Port, Routing Mode, Failure Policy, FEC Policy, Engine Runtime).
+- **C (`engine-native/c/`):** Zero-copy IPv4/UDP/TCP packet parser, traffic-tier classifier, 16-byte JITER Relay Wire Protocol v1 codec, 8-byte XOR FEC wire header pack/unpack, and 64-bit aligned GF(2) XOR kernel.
+- **C++ (`engine-native/cpp/`, `src/main/cpp/jiter_jni.cpp`):** Fixed-capacity slab `PacketPool` (~384 KB bounded RAM, zero heap allocations on hot path), 3-tier Strict Priority `TrafficScheduler` + anti-bufferbloat background pacer wired live to the TUN pump via JNI.
+- **Rust (`engine-rust/` & `relay/`):** Memory-safe Formulas #1, #2, #3 + `AdaptiveController` linked into `libjiter_native.so` via C-ABI FFI (`jiter_math_ffi.h`), plus the standalone Stage 3 **JITER Edge Relay Server** (`relay/`).
 
 ## Build & Test
 

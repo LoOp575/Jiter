@@ -73,6 +73,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var tvEngineStack: TextView
     private lateinit var tvBackendSummary: TextView
+    private lateinit var tvRelayTelemetry: TextView
     private lateinit var btnBackendConfig: MaterialButton
 
     private lateinit var tvUsageStatus: TextView
@@ -158,6 +159,7 @@ class MainActivity : AppCompatActivity() {
 
         tvEngineStack = findViewById(R.id.tvEngineStack)
         tvBackendSummary = findViewById(R.id.tvBackendSummary)
+        tvRelayTelemetry = findViewById(R.id.tvRelayTelemetry)
         btnBackendConfig = findViewById(R.id.btnBackendConfig)
 
         tvUsageStatus = findViewById(R.id.tvUsageStatus)
@@ -414,6 +416,33 @@ class MainActivity : AppCompatActivity() {
             if (cfg.controlPlaneUrl.isNotBlank()) {
                 append("\nAPI: ${cfg.controlPlaneUrl}")
             }
+        }
+        tvRelayTelemetry.text = when {
+            snapshot.relayConnected -> {
+                val region = snapshot.relayRegion ?: "EDGE"
+                val rttLabel = snapshot.relayRttMs?.let {
+                    String.format(Locale.US, "%.1f ms", it)
+                } ?: "--"
+                getString(
+                    R.string.relay_status_connected_fmt,
+                    region,
+                    rttLabel,
+                    snapshot.selectedRoute.label,
+                    snapshot.tunTxPackets,
+                    snapshot.tunRxPackets,
+                    snapshot.fecRecoveredPackets,
+                )
+            }
+            cfg.hasCustomRelay() -> {
+                getString(
+                    R.string.relay_status_standby_fmt,
+                    "${cfg.relayHost}:${cfg.relayPort}",
+                    snapshot.selectedRoute.label,
+                    snapshot.tunTxPackets,
+                    snapshot.tunRxPackets,
+                )
+            }
+            else -> getString(R.string.relay_status_unconfigured)
         }
     }
 

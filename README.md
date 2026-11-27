@@ -186,16 +186,22 @@ Jiter/
 ├── android/                                  # Kotlin Android App + NDK CMake JNI (libjiter_native.so)
 │   ├── app/src/main/cpp/{CMakeLists.txt, jiter_jni.cpp}
 │   └── app/src/main/java/com/jiter/app/
-│       ├── MainActivity.kt                   # GO/STOP UI, | indicator, live telemetry & Backend Settings dialog
+│       ├── MainActivity.kt                   # GO/STOP UI, ID/EN switcher, live telemetry & Backend Settings
 │       ├── bridge/{EngineAdapter,NativeEngineBridge}.kt
-│       ├── config/{BackendConfig,BackendConfigStore}.kt
+│       ├── config/{BackendConfig,BackendConfigStore,LanguageManager}.kt
+│       ├── relay/{RelayProtocol,RelayTunnelClient}.kt
 │       ├── engine/                           # Pure Kotlin fallback implementation
-│       ├── vpn/JiterVpnService.kt
+│       ├── vpn/JiterVpnService.kt            # Live TUN data-plane pump + protected UDP relay client
 │       ├── context/AppContextDetector.kt
 │       ├── network/NetworkMonitor.kt
 │       ├── notification/StatusNotification.kt
 │       └── state/SessionStore.kt
-└── relay/                                    # [Stage 3 — Next] JKT/SG edge relay + WireGuard/Noise tunnel
+└── relay/                                    # Stage 3 JKT/SG Rust UDP Relay Edge (3-tier pacer + XOR FEC)
+    ├── Cargo.toml
+    ├── Dockerfile
+    ├── deploy/jiter-relay.service
+    ├── src/{lib,main,protocol,scheduler,session,server}.rs
+    └── tests/integration_relay.rs
 ```
 
 ### Run Local Verification
@@ -207,7 +213,10 @@ make -C engine-native clean test
 # 2. Rust Mathematical Engine & C-ABI FFI tests (cargo)
 (cd engine-rust && cargo test)
 
-# 3. Python Reference Lab unit tests & 4 experiments
+# 3. Stage 3 Rust Edge Relay Server & real UDP integration tests
+(cd relay && cargo test -- --nocapture)
+
+# 4. Python Reference Lab unit tests & 4 experiments
 python3 -m unittest discover -s test-lab/simulations -p "test_*.py" -v
 python3 test-lab/simulations/run_experiments.py
 ```
@@ -228,6 +237,6 @@ python3 test-lab/simulations/run_experiments.py
 | Stage | Deliverable | Status |
 |---|---|---|
 | **Stage 1: Blueprint & Math Lab** | Blueprint v2.0, Core Engine Spec, Python reference implementation (#1, #2, #3 + Closed-Loop Controller), unit tests, 4 experiments | **Done** |
-| **Stage 2: Polyglot Native Android PoC** | Native **C** packet engine + **C++** slab `PacketPool` & `TrafficScheduler` + **Rust** math engine (`jiter_math_ffi.h`) linked into `libjiter_native.so` + **Kotlin** Android UI/VpnService/Notifications + **Swappable Backend Config** + GitHub Actions CI APK build | **Done** |
-| **Stage 3: Tunnel & Edge Relay PoC** | WireGuard/Noise encrypted transport + two-sided Priority Queue / Pacer / Adaptive XOR FEC forwarding between Android client and swappable Jakarta/Singapore VPS relay | Next |
-| **Stage 4: Hardware Profiling & Beta** | Release ARM64 benchmarking (APK ≤15 MB, RAM ≤60 MB PSS, battery drain, Wi-Fi ↔ 4G/5G soak tests, DNS/IPv6 leak tests) | Planned |
+| **Stage 2: Polyglot Native Android PoC** | Native **C** packet engine + **C++** slab `PacketPool` & `TrafficScheduler` + **Rust** math engine (`jiter_math_ffi.h`) linked into `libjiter_native.so` + **Kotlin** Android UI/VpnService/Notifications + **Swappable Backend Config** + **Bahasa Indonesia / English live language switcher** + GitHub Actions CI APK build | **Done** |
+| **Stage 3: Edge Relay & Live TUN Data-Plane** | Unified 16-byte JITER Wire Protocol v1 (`docs/architecture/relay-wire-protocol.md`) + **Rust JITER Relay Edge (`relay/`)** with RAM-only ephemeral sessions, downstream 3-tier strict-priority pacer, GF(2) XOR FEC recovery, Docker/systemd VPS deploy kit + Android protected UDP `RelayTunnelClient`, live TUN→C/C++→Relay pump, and Formula #1 Native-vs-Relay switching | **Done** |
+| **Stage 4: Noise_IK/WireGuard AEAD & Hardware Profiling** | Outer Noise_IK / WireGuard AEAD transport encryption wrapper (`FLAG_ENCRYPTED`), release ARM64 benchmarking (APK ≤15 MB, RAM ≤60 MB PSS, battery drain, Wi-Fi ↔ 4G/5G soak tests, DNS/IPv6 leak tests) | Next |

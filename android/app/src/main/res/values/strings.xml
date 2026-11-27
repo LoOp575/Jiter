@@ -44,6 +44,9 @@
     <string name="status_engine_fallback">Kotlin Pure (Native .so unavailable)</string>
 
     <string name="section_backend">Backend &amp; Engine Control (Swappable)</string>
+    <string name="relay_status_unconfigured">Relay: Not configured · Direct Probe mode</string>
+    <string name="relay_status_standby_fmt">Relay: %1$s (Standby) · Route: %2$s · TX %3$d / RX %4$d</string>
+    <string name="relay_status_connected_fmt">Relay %1$s · %2$s · Route: %3$s\nTUN TX: %4$d · RX: %5$d · FEC Recov: %6$d</string>
     <string name="action_configure_backend">Configure Backend / Relay</string>
     <string name="dialog_backend_title">Backend, Engine &amp; Language</string>
     <string name="action_save">Save</string>
@@ -68,5 +71,5 @@
     <string name="usage_access_grant">Grant Usage Access</string>
     <string name="usage_access_manage">Manage Usage Access</string>
 
-    <string name="poc_footnote">Stage 2 Native PoC: Links C packet parser, C++ slab PacketPool/Scheduler, and Rust math FFI inside libjiter_native.so with swappable backend config. Uses diagnostic TUN (10.77.0.0/24) until Stage 3 Relay forwarding is enabled.</string>
+    <string name="poc_footnote">Stage 3 Polyglot + Relay: Runs C packet parser, C++ slab PacketPool/Scheduler, and Rust math FFI inside libjiter_native.so, wired to the swappable Stage 3 Rust UDP Relay Edge with two-sided BG pacing and GF(2) XOR FEC.</string>
 </resources>
