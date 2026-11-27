@@ -2,7 +2,9 @@ package com.jiter.app.engine
 
 import com.jiter.app.bridge.KotlinEngineAdapter
 import com.jiter.app.bridge.NativeEngineBridge
+import com.jiter.app.config.AppLanguage
 import com.jiter.app.config.BackendConfig
+import com.jiter.app.config.LanguageManager
 import com.jiter.app.config.RoutingMode
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -316,5 +318,31 @@ class JiterEngineTest {
         assertTrue(decoded.contains("PACER_THROTTLE_BG"))
         assertTrue(decoded.contains("FEC_ACTIVE_K4"))
         assertTrue(decoded.contains("ROUTE_SWITCH_TO_RELAY"))
+    }
+
+    @Test
+    fun languageManagerNormalizesIndonesianAndEnglishCodes() {
+        assertEquals(AppLanguage.INDONESIAN, LanguageManager.fromLanguageCode("id"))
+        assertEquals(AppLanguage.INDONESIAN, LanguageManager.fromLanguageCode("in"))
+        assertEquals(AppLanguage.INDONESIAN, LanguageManager.fromLanguageCode("id-ID"))
+        assertEquals(AppLanguage.ENGLISH, LanguageManager.fromLanguageCode("en-US"))
+        assertEquals(AppLanguage.SYSTEM, LanguageManager.fromLanguageCode(""))
+
+        assertEquals(
+            AppLanguage.ENGLISH,
+            LanguageManager.toggleIndonesianEnglish(AppLanguage.INDONESIAN, "en"),
+        )
+        assertEquals(
+            AppLanguage.INDONESIAN,
+            LanguageManager.toggleIndonesianEnglish(AppLanguage.ENGLISH, "id"),
+        )
+        assertEquals(
+            AppLanguage.ENGLISH,
+            LanguageManager.toggleIndonesianEnglish(AppLanguage.SYSTEM, "in"),
+        )
+        assertEquals(
+            AppLanguage.INDONESIAN,
+            LanguageManager.toggleIndonesianEnglish(AppLanguage.SYSTEM, "en"),
+        )
     }
 }

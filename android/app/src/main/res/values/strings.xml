@@ -5,9 +5,18 @@
 
     <string name="action_go">GO</string>
     <string name="action_stop">STOP</string>
+    <string name="lang_switch_id">ID</string>
+    <string name="lang_switch_en">EN</string>
+    <string name="lang_label_system">System Default</string>
+    <string name="lang_label_id">Bahasa Indonesia</string>
+    <string name="lang_label_en">English</string>
+    <string name="cfg_language_label">App Language</string>
 
     <string name="notification_channel_name">JITER Active Session</string>
     <string name="notification_channel_desc">Shows live JITER tunnel state, probe RTT, jitter, and active profile.</string>
+    <string name="notif_summary_fmt">Probe RTT: %1$s · Jitter: %2$s · Loss: %3$s</string>
+    <string name="notif_detail_line2_fmt">Bufferbloat: %1$s · FEC: %2$s · BG Pacer: %3$d%%</string>
+    <string name="notif_detail_line3_fmt">Net: %1$s · Route: %2$s</string>
 
     <string name="section_profile">Adaptive Profile (No Tunnel Restart)</string>
     <string name="profile_auto">Auto</string>
@@ -26,15 +35,17 @@
 
     <string name="reasons_idle">No active controller signals yet</string>
 
-    <string name="section_usage">Foreground App Detection (Optional)</string>
-    <string name="usage_access_granted">Usage Access granted — JITER automatically adapts profile when switching apps.</string>
-    <string name="usage_access_missing">Usage Access not granted (fallback: Safe Balanced). Note: for sideloaded APKs on Android 13+, enable "Allow restricted settings" in App Info first.</string>
-    <string name="usage_access_grant">Grant Usage Access</string>
-    <string name="usage_access_manage">Manage Usage Access</string>
+    <string name="status_idle">Idle — tap GO to start JITER session</string>
+    <string name="status_vpn_declined">VPN consent declined — session not started</string>
+    <string name="status_engine_prefix">Engine: %1$s</string>
+    <string name="status_engine_kotlin_selected">Kotlin Pure (Selected)</string>
+    <string name="status_engine_native_ready">Native (Rust + C++ + C) Ready</string>
+    <string name="status_engine_hybrid_ready">Hybrid (Kotlin Math + C/C++ Net) Ready</string>
+    <string name="status_engine_fallback">Kotlin Pure (Native .so unavailable)</string>
 
     <string name="section_backend">Backend &amp; Engine Control (Swappable)</string>
     <string name="action_configure_backend">Configure Backend / Relay</string>
-    <string name="dialog_backend_title">Backend &amp; Engine Settings</string>
+    <string name="dialog_backend_title">Backend, Engine &amp; Language</string>
     <string name="action_save">Save</string>
     <string name="action_reset">Reset Default</string>
     <string name="action_cancel">Cancel</string>
@@ -51,5 +62,11 @@
     <string name="cfg_fec_policy_label">XOR FEC Policy (Formula #3)</string>
     <string name="cfg_engine_backend_label">Engine Runtime Backend</string>
 
-    <string name="poc_footnote">Stage 2+ Native PoC: Links C packet parser, C++ slab PacketPool/Scheduler, and Rust math FFI inside libjiter_native.so with swappable backend config. Uses diagnostic TUN (10.77.0.0/24) until Stage 3 Relay forwarding is enabled.</string>
+    <string name="section_usage">Foreground App Detection (Optional)</string>
+    <string name="usage_access_granted">Usage Access granted — JITER automatically adapts profile when switching apps.</string>
+    <string name="usage_access_missing">Usage Access not granted (fallback: Safe Balanced). Note: for sideloaded APKs on Android 13+, enable "Allow restricted settings" in App Info first.</string>
+    <string name="usage_access_grant">Grant Usage Access</string>
+    <string name="usage_access_manage">Manage Usage Access</string>
+
+    <string name="poc_footnote">Stage 2 Native PoC: Links C packet parser, C++ slab PacketPool/Scheduler, and Rust math FFI inside libjiter_native.so with swappable backend config. Uses diagnostic TUN (10.77.0.0/24) until Stage 3 Relay forwarding is enabled.</string>
 </resources>

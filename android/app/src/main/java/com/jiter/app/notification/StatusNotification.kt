@@ -86,12 +86,10 @@ class StatusNotification(private val context: Context) {
         val bloatStr = snapshot.bufferbloatMs?.let { String.format(Locale.US, "+%.1f ms", it) } ?: "--"
         val pacerPct = (snapshot.bgPacerRatio * 100.0).toInt()
 
-        val summary = "Probe RTT: $rttStr · Jitter: $jitStr · Loss: $lossStr"
-        val expanded = buildString {
-            appendLine(summary)
-            appendLine("Bufferbloat: $bloatStr · FEC: ${snapshot.fecMode.label} · BG Pacer: $pacerPct%")
-            append("Net: ${snapshot.networkType} · Route: ${snapshot.selectedRoute.label}")
-        }
+        val summary = context.getString(R.string.notif_summary_fmt, rttStr, jitStr, lossStr)
+        val line2 = context.getString(R.string.notif_detail_line2_fmt, bloatStr, snapshot.fecMode.label, pacerPct)
+        val line3 = context.getString(R.string.notif_detail_line3_fmt, snapshot.networkType, snapshot.selectedRoute.label)
+        val expanded = "$summary\n$line2\n$line3"
 
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(smallIconRes)

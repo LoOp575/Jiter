@@ -26,11 +26,13 @@ import com.google.android.material.chip.Chip
 import com.google.android.material.chip.ChipGroup
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.jiter.app.bridge.NativeEngineBridge
+import com.jiter.app.config.AppLanguage
 import com.jiter.app.config.BackendConfig
 import com.jiter.app.config.BackendConfigStore
 import com.jiter.app.config.EngineRuntimePreference
 import com.jiter.app.config.FailurePolicy
 import com.jiter.app.config.FecPolicy
+import com.jiter.app.config.LanguageManager
 import com.jiter.app.config.RoutingMode
 import com.jiter.app.context.AppContextDetector
 import com.jiter.app.engine.QualityState
@@ -46,6 +48,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var appContextDetector: AppContextDetector
 
+    private lateinit var btnToggleLanguage: MaterialButton
     private lateinit var statusLineIndicator: View
     private lateinit var tvSessionState: TextView
     private lateinit var tvQualityScore: TextView
@@ -86,7 +89,7 @@ class MainActivity : AppCompatActivity() {
             SessionStore.update {
                 it.copy(
                     sessionState = SessionState.STOPPED,
-                    statusDetail = "VPN consent declined — session not started",
+                    statusDetail = getString(R.string.status_vpn_declined),
                 )
             }
         }
@@ -126,9 +129,11 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refreshUsageAccessStatus()
+        refreshLanguageToggleLabel()
     }
 
     private fun bindViews() {
+        btnToggleLanguage = findViewById(R.id.btnToggleLanguage)
         statusLineIndicator = findViewById(R.id.statusLineIndicator)
         tvSessionState = findViewById(R.id.tvSessionState)
         tvQualityScore = findViewById(R.id.tvQualityScore)
@@ -160,6 +165,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupListeners() {
+        btnToggleLanguage.setOnClickListener {
+            val next = LanguageManager.toggleIndonesianEnglish()
+            LanguageManager.apply(next)
+            notifyServiceConfigChanged()
+        }
+
         btnGoStop.setOnClickListener {
             val state = SessionStore.snapshot.value.sessionState
             if (isSessionActive(state)) {
@@ -194,8 +205,18 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun refreshLanguageToggleLabel() {
+        val next = LanguageManager.toggleIndonesianEnglish()
+        btnToggleLanguage.text = if (next == AppLanguage.INDONESIAN) {
+            getString(R.string.lang_switch_id)
+        } else {
+            getString(R.string.lang_switch_en)
+        }
+    }
+
     private fun showBackendConfigDialog() {
         val current = BackendConfigStore.ensureLoaded(this)
+        val currentLang = LanguageManager.currentSelection()
         val view = LayoutInflater.from(this).inflate(R.layout.dialog_backend_config, null)
 
         val etControlUrl = view.findViewById<EditText>(R.id.etControlPlaneUrl)
@@ -207,6 +228,7 @@ class MainActivity : AppCompatActivity() {
         val spFailure = view.findViewById<Spinner>(R.id.spinnerFailurePolicy)
         val spFec = view.findViewById<Spinner>(R.id.spinnerFecPolicy)
         val spEngine = view.findViewById<Spinner>(R.id.spinnerEngineBackend)
+        val spLanguage = view.findViewById<Spinner>(R.id.spinnerLanguage)
 
         etControlUrl.setText(current.controlPlaneUrl)
         etRelayHost.setText(current.relayHost)
@@ -246,6 +268,21 @@ class MainActivity : AppCompatActivity() {
         )
         spEngine.setSelection(engineItems.indexOf(current.enginePreference).coerceAtLeast(0))
 
+        val languageItems = AppLanguage.entries
+        val languageLabels = languageItems.map { lang ->
+            when (lang) {
+                AppLanguage.SYSTEM -> getString(R.string.lang_label_system)
+                AppLanguage.INDONESIAN -> getString(R.string.lang_label_id)
+                AppLanguage.ENGLISH -> getString(R.string.lang_label_en)
+            }
+        }
+        spLanguage.adapter = ArrayAdapter(
+            this,
+            android.R.layout.simple_spinner_dropdown_item,
+            languageLabels,
+        )
+        spLanguage.setSelection(languageItems.indexOf(currentLang).coerceAtLeast(0))
+
         MaterialAlertDialogBuilder(this)
             .setTitle(R.string.dialog_backend_title)
             .setView(view)
@@ -264,10 +301,15 @@ class MainActivity : AppCompatActivity() {
                     enginePreference = engineItems[spEngine.selectedItemPosition],
                 )
                 BackendConfigStore.save(this, updated)
+                val chosenLang = languageItems[spLanguage.selectedItemPosition]
+                if (chosenLang != currentLang) {
+                    LanguageManager.apply(chosenLang)
+                }
                 notifyServiceConfigChanged()
             }
             .setNeutralButton(R.string.action_reset) { _, _ ->
                 BackendConfigStore.resetDefaults(this)
+                LanguageManager.apply(AppLanguage.SYSTEM)
                 notifyServiceConfigChanged()
             }
             .setNegativeButton(R.string.action_cancel, null)
@@ -362,7 +404,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             detectAvailableRuntimeLabel(cfg.enginePreference)
         }
-        tvEngineStack.text = "Engine: $runtimeDisplay"
+        tvEngineStack.text = getString(R.string.status_engine_prefix, runtimeDisplay)
         tvBackendSummary.text = buildString {
             append(cfg.summaryLabel())
             append(" · ")
@@ -376,13 +418,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun detectAvailableRuntimeLabel(pref: EngineRuntimePreference): String {
-        if (pref == EngineRuntimePreference.KOTLIN_PURE) return "Kotlin Pure (Selected)"
+        if (pref == EngineRuntimePreference.KOTLIN_PURE) {
+            return getString(R.string.status_engine_kotlin_selected)
+        }
         return when {
             NativeEngineBridge.hasRustMathEngine && NativeEngineBridge.hasCPacketEngine ->
-                "Native (Rust + C++ + C) Ready"
+                getString(R.string.status_engine_native_ready)
             NativeEngineBridge.hasCPacketEngine && NativeEngineBridge.hasCppScheduler ->
-                "Hybrid (Kotlin Math + C/C++ Net) Ready"
-            else -> "Kotlin Pure (Native .so unavailable)"
+                getString(R.string.status_engine_hybrid_ready)
+            else -> getString(R.string.status_engine_fallback)
         }
     }
 
@@ -390,7 +434,13 @@ class MainActivity : AppCompatActivity() {
         val active = isSessionActive(snapshot.sessionState)
 
         tvSessionState.text = snapshot.sessionState.label
-        tvStatusDetail.text = snapshot.statusDetail
+        tvStatusDetail.text = if (snapshot.sessionState == SessionState.STOPPED &&
+            snapshot.statusDetail == SessionSnapshot().statusDetail
+        ) {
+            getString(R.string.status_idle)
+        } else {
+            snapshot.statusDetail
+        }
         tvQualityScore.text = snapshot.qualityScore?.let {
             String.format(Locale.US, "Q %.0f", it)
         } ?: "Q --"
