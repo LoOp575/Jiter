@@ -82,7 +82,7 @@ object BackendConfigStore {
                 ?: BackendConfig.DEFAULT_RELAY_PSK,
             tunnelScope = parseEnum(
                 prefs.getString(KEY_TUNNEL_SCOPE, null),
-                TunnelScope.DIAGNOSTIC_SUBNET,
+                TunnelScope.HYBRID_AUTO,
             ),
             probeHost = prefs.getString(KEY_PROBE_HOST, BackendConfig.DEFAULT_PROBE_HOST)
                 ?: BackendConfig.DEFAULT_PROBE_HOST,

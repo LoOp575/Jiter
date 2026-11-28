@@ -38,7 +38,17 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Run Rust unit & FFI tests
         working-directory: engine-rust
-        run: cargo test -- --nocapture
+        run: |
+          set +e
+          cargo test -- --nocapture > /tmp/rust-test.log 2>&1
+          RC=$?
+          cat /tmp/rust-test.log
+          if [ $RC -ne 0 ]; then
+            grep -E "error(\[E[0-9]+\])?:|FAILED|panicked at" /tmp/rust-test.log | head -n 30 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+          fi
+          exit $RC
 
   relay-server:
     name: Stage 3 — JITER Relay Edge Server (Rust UDP + XOR FEC + Pacer)

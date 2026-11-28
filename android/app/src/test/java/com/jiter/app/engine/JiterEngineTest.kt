@@ -10,6 +10,8 @@ import com.jiter.app.config.RoutingMode
 import com.jiter.app.config.TunnelScope
 import com.jiter.app.context.TrafficAutoProfileDetector
 import com.jiter.app.context.UidFlowClassifier
+import com.jiter.app.local.Ipv4PacketCodec
+import com.jiter.app.local.LocalTrafficShaper
 import com.jiter.app.relay.ControlPlaneClient
 import com.jiter.app.relay.EncryptedHelloAckPayload
 import com.jiter.app.relay.EncryptedHelloReqPayload
@@ -1139,5 +1141,136 @@ class JiterEngineTest {
             serverSocket.close()
             serverThread.join(1_000L)
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // Stage 6: Hybrid Local Traffic Shaper (IPv4/UDP Codec + Real Loopback NAT)
+    // ------------------------------------------------------------------------
+
+    @Test
+    fun stage6Ipv4PacketCodecBuildsAndParsesUdpWithValidChecksums() {
+        val srcIp = byteArrayOf(10, 77, 0, 2)
+        val dstIp = byteArrayOf(1, 1, 1, 1)
+        val payload = "JITER_DNS_FASTPATH_CHECK".toByteArray(Charsets.UTF_8)
+
+        val pkt = Ipv4PacketCodec.buildIpv4UdpPacket(
+            srcIp = srcIp,
+            srcPort = 54321,
+            dstIp = dstIp,
+            dstPort = 53,
+            payload = payload,
+            identification = 0x1234,
+        )
+
+        assertEquals(28 + payload.size, pkt.size)
+        assertEquals(Ipv4PacketCodec.PROTO_UDP, Ipv4PacketCodec.getProtocol(pkt, pkt.size))
+        assertEquals(53, Ipv4PacketCodec.getDstPort(pkt, pkt.size))
+        // RFC 1071 verification: checksum over IPv4 header including checksum field must equal 0
+        assertEquals(0, Ipv4PacketCodec.onesComplementChecksum(pkt, 0, 20))
+
+        val parsed = requireNotNull(Ipv4PacketCodec.parseIpv4Udp(pkt, pkt.size))
+        assertArrayEquals(srcIp, parsed.srcIp)
+        assertArrayEquals(dstIp, parsed.dstIp)
+        assertEquals(54321, parsed.srcPort)
+        assertEquals(53, parsed.dstPort)
+        assertEquals(payload.size, parsed.payloadLength)
+        assertArrayEquals(
+            payload,
+            pkt.copyOfRange(parsed.payloadOffset, parsed.payloadOffset + parsed.payloadLength),
+        )
+        assertFalse(Ipv4PacketCodec.isMulticastOrBroadcast(dstIp))
+        assertTrue(Ipv4PacketCodec.isMulticastOrBroadcast(byteArrayOf(224.toByte(), 0, 0, 251.toByte())))
+    }
+
+    @Test
+    fun stage6LocalTrafficShaperForwardsRealUdpEchoOverLoopback() {
+        val echoServer = DatagramSocket(0, InetAddress.getByName("127.0.0.1"))
+        echoServer.soTimeout = 300
+        val stopEcho = AtomicBoolean(false)
+        val echoThread = Thread({
+            val buf = ByteArray(2048)
+            val dp = DatagramPacket(buf, buf.size)
+            while (!stopEcho.get() && !echoServer.isClosed) {
+                try {
+                    dp.length = buf.size
+                    echoServer.receive(dp)
+                    val reply = ("ECHO:" + String(buf, 0, dp.length, Charsets.UTF_8))
+                        .toByteArray(Charsets.UTF_8)
+                    echoServer.send(DatagramPacket(reply, reply.size, dp.address, dp.port))
+                } catch (_: Exception) {
+                    // Timeout or closed
+                }
+            }
+        }, "test-stage6-udp-echo").apply {
+            isDaemon = true
+            start()
+        }
+
+        val downlinkLatch = CountDownLatch(1)
+        val downlinkPacket = AtomicReference<ByteArray?>(null)
+        val shaper = LocalTrafficShaper(
+            protectDatagram = { true },
+            protectStream = { true },
+            onDownlinkPacket = { buf, len ->
+                downlinkPacket.set(buf.copyOf(len))
+                downlinkLatch.countDown()
+            },
+            tcpBackendFactory = { _, _ -> null }, // UDP-only path verified in JVM; Rust smoltcp verified by cargo test
+        )
+
+        try {
+            assertTrue(shaper.start(mtu = 1280))
+            shaper.updatePacer(ratio = 0.35, linkMbps = 18.0)
+
+            val fakeClientIp = byteArrayOf(10, 77, 0, 2)
+            val loopbackIp = byteArrayOf(127, 0, 0, 1)
+            val queryPayload = "PING_STAGE6_LOCAL".toByteArray(Charsets.UTF_8)
+            val outboundIpv4 = Ipv4PacketCodec.buildIpv4UdpPacket(
+                srcIp = fakeClientIp,
+                srcPort = 49152,
+                dstIp = loopbackIp,
+                dstPort = echoServer.localPort,
+                payload = queryPayload,
+            )
+
+            shaper.submitScheduledPacket(outboundIpv4, outboundIpv4.size, RelayProtocol.TIER_GAME)
+            assertTrue("Expected downlink UDP echo packet", downlinkLatch.await(2, TimeUnit.SECONDS))
+
+            val replyRaw = requireNotNull(downlinkPacket.get())
+            assertEquals(0, Ipv4PacketCodec.onesComplementChecksum(replyRaw, 0, 20))
+            val parsedReply = requireNotNull(Ipv4PacketCodec.parseIpv4Udp(replyRaw, replyRaw.size))
+            assertArrayEquals(loopbackIp, parsedReply.srcIp)
+            assertEquals(echoServer.localPort, parsedReply.srcPort)
+            assertArrayEquals(fakeClientIp, parsedReply.dstIp)
+            assertEquals(49152, parsedReply.dstPort)
+
+            val replyText = String(
+                replyRaw,
+                parsedReply.payloadOffset,
+                parsedReply.payloadLength,
+                Charsets.UTF_8,
+            )
+            assertEquals("ECHO:PING_STAGE6_LOCAL", replyText)
+
+            val st = shaper.stats()
+            assertTrue(st.txPackets >= 1L)
+            assertTrue(st.rxPackets >= 1L)
+            assertTrue(st.activeUdpFlows >= 1)
+        } finally {
+            shaper.stop()
+            stopEcho.set(true)
+            echoServer.close()
+            echoThread.join(1_000L)
+        }
+    }
+
+    @Test
+    fun stage6HybridAutoTunnelScopeDefaultsAndLocalShaperSummary() {
+        val defaultCfg = BackendConfig().sanitized()
+        assertEquals(TunnelScope.HYBRID_AUTO, defaultCfg.tunnelScope)
+        assertTrue(defaultCfg.summaryLabel().contains("Hybrid TUN"))
+
+        val localOnly = BackendConfig(tunnelScope = TunnelScope.LOCAL_SHAPER_ONLY).sanitized()
+        assertTrue(localOnly.summaryLabel().contains("Local Shaper"))
     }
 }

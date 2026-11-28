@@ -59,6 +59,14 @@ test("bootstrap ranks enabled nodes by preferred region, load, and priority", as
   assert.equal(res.json.nodes[0].psk, "psk-jkt-1");
   assert.equal(res.json.nodes[1].id, "sg-busy");
   assert.equal(res.json.policy.tunnelScope, "FULL_INTERNET_TUNNEL");
+
+  const hybridRes = await handleBootstrapRequest({
+    method: "POST",
+    env: { JITER_DEFAULT_TUNNEL_SCOPE: "HYBRID_AUTO" },
+  });
+  assert.equal(hybridRes.status, 200);
+  assert.equal(hybridRes.json.nodes.length, 0);
+  assert.equal(hybridRes.json.policy.tunnelScope, "HYBRID_AUTO");
 });
 
 test("bootstrap enforces optional X-Jiter-App-Key and rate limiting", async () => {

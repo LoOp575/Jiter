@@ -7,7 +7,7 @@ module.exports = async function handler(_req, res) {
     JSON.stringify({
       ok: true,
       service: "jiter-control-plane",
-      version: "0.6.0",
+      version: "0.7.0",
       serverTimeMs: Date.now(),
     }),
   );

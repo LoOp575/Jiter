@@ -380,4 +380,350 @@ Java_com_jiter_app_bridge_NativeEngineBridge_nativeDequeuePacket(
     return JNI_TRUE;
 }
 
+// ----------------------------------------------------------------------------
+// Stage 6: JNI Bridge for Rust smoltcp Transparent Local TCP Stack
+// ----------------------------------------------------------------------------
+
+#if JITER_HAS_RUST_MATH
+static JiterLocalTcpHandle* local_tcp_from_handle(jlong ptr) {
+    if (ptr == 0) {
+        return nullptr;
+    }
+    return reinterpret_cast<JiterLocalTcpHandle*>(static_cast<uintptr_t>(ptr));
+}
+#endif
+
+JNIEXPORT jboolean JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeIsSupported(JNIEnv* env, jobject thiz) {
+    (void)env;
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    return JNI_TRUE;
+#else
+    return JNI_FALSE;
+#endif
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeCreate(
+    JNIEnv* env,
+    jobject thiz,
+    jint mtu,
+    jlong seed
+) {
+    (void)env;
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = jiter_local_tcp_create(
+        static_cast<uint16_t>(mtu),
+        static_cast<uint64_t>(seed)
+    );
+    return static_cast<jlong>(reinterpret_cast<uintptr_t>(h));
+#else
+    (void)mtu;
+    (void)seed;
+    return 0;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeDestroy(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle
+) {
+    (void)env;
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h != nullptr) {
+        jiter_local_tcp_destroy(h);
+    }
+#else
+    (void)handle;
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeIngestIpv4(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jbyteArray pkt,
+    jint length,
+    jint tier,
+    jlong now_ms,
+    jlongArray out_meta
+) {
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h == nullptr || pkt == nullptr || length <= 0 || out_meta == nullptr) {
+        return -1;
+    }
+    if (length > env->GetArrayLength(pkt) || env->GetArrayLength(out_meta) < 3) {
+        return -1;
+    }
+    jbyte* bytes = env->GetByteArrayElements(pkt, nullptr);
+    if (bytes == nullptr) {
+        return -1;
+    }
+    uint64_t flow_id = 0;
+    uint32_t dst_ipv4_be = 0;
+    uint16_t dst_port = 0;
+    const int32_t res = jiter_local_tcp_ingest_ipv4(
+        h,
+        reinterpret_cast<const uint8_t*>(bytes),
+        static_cast<size_t>(length),
+        static_cast<uint8_t>(tier & 0xFF),
+        static_cast<int64_t>(now_ms),
+        &flow_id,
+        &dst_ipv4_be,
+        &dst_port
+    );
+    env->ReleaseByteArrayElements(pkt, bytes, JNI_ABORT);
+    if (res == 1) {
+        jlong meta[3] = {
+            static_cast<jlong>(flow_id),
+            static_cast<jlong>(dst_ipv4_be),
+            static_cast<jlong>(dst_port),
+        };
+        env->SetLongArrayRegion(out_meta, 0, 3, meta);
+    }
+    return static_cast<jint>(res);
+#else
+    (void)env;
+    (void)handle;
+    (void)pkt;
+    (void)length;
+    (void)tier;
+    (void)now_ms;
+    (void)out_meta;
+    return -1;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativePoll(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jlong now_ms
+) {
+    (void)env;
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h != nullptr) {
+        jiter_local_tcp_poll(h, static_cast<int64_t>(now_ms));
+    }
+#else
+    (void)handle;
+    (void)now_ms;
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativePopTxPacket(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jbyteArray out_buf
+) {
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h == nullptr || out_buf == nullptr) {
+        return 0;
+    }
+    const jsize cap = env->GetArrayLength(out_buf);
+    if (cap <= 0) {
+        return 0;
+    }
+    uint8_t tmp[2048];
+    const size_t max_len = (static_cast<size_t>(cap) < sizeof(tmp))
+        ? static_cast<size_t>(cap)
+        : sizeof(tmp);
+    const size_t n = jiter_local_tcp_pop_tx_packet(h, tmp, max_len);
+    if (n > 0) {
+        env->SetByteArrayRegion(
+            out_buf,
+            0,
+            static_cast<jsize>(n),
+            reinterpret_cast<const jbyte*>(tmp)
+        );
+    }
+    return static_cast<jint>(n);
+#else
+    (void)env;
+    (void)handle;
+    (void)out_buf;
+    return 0;
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeRecvFromApp(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jlong flow_id,
+    jbyteArray out_buf,
+    jint max_len,
+    jlong now_ms
+) {
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h == nullptr || out_buf == nullptr || max_len <= 0) {
+        return -2;
+    }
+    const jsize cap = env->GetArrayLength(out_buf);
+    const jint clamped = (max_len < cap) ? max_len : cap;
+    jbyte* buf = env->GetByteArrayElements(out_buf, nullptr);
+    if (buf == nullptr) {
+        return -2;
+    }
+    const int32_t res = jiter_local_tcp_recv_from_app(
+        h,
+        static_cast<uint64_t>(flow_id),
+        reinterpret_cast<uint8_t*>(buf),
+        static_cast<size_t>(clamped),
+        static_cast<int64_t>(now_ms)
+    );
+    env->ReleaseByteArrayElements(out_buf, buf, res > 0 ? 0 : JNI_ABORT);
+    return static_cast<jint>(res);
+#else
+    (void)env;
+    (void)handle;
+    (void)flow_id;
+    (void)out_buf;
+    (void)max_len;
+    (void)now_ms;
+    return -2;
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeSendToApp(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jlong flow_id,
+    jbyteArray data,
+    jint offset,
+    jint length,
+    jlong now_ms
+) {
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h == nullptr || data == nullptr || offset < 0 || length < 0) {
+        return -1;
+    }
+    const jsize arr_len = env->GetArrayLength(data);
+    if (offset + length > arr_len) {
+        return -1;
+    }
+    jbyte* bytes = env->GetByteArrayElements(data, nullptr);
+    if (bytes == nullptr) {
+        return -1;
+    }
+    const int32_t res = jiter_local_tcp_send_to_app(
+        h,
+        static_cast<uint64_t>(flow_id),
+        reinterpret_cast<const uint8_t*>(bytes + offset),
+        static_cast<size_t>(length),
+        static_cast<int64_t>(now_ms)
+    );
+    env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
+    return static_cast<jint>(res);
+#else
+    (void)env;
+    (void)handle;
+    (void)flow_id;
+    (void)data;
+    (void)offset;
+    (void)length;
+    (void)now_ms;
+    return -1;
+#endif
+}
+
+JNIEXPORT jint JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeCanSendToApp(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jlong flow_id
+) {
+    (void)env;
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h == nullptr) {
+        return -1;
+    }
+    return static_cast<jint>(jiter_local_tcp_can_send_to_app(h, static_cast<uint64_t>(flow_id)));
+#else
+    (void)handle;
+    (void)flow_id;
+    return -1;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeCloseFlow(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jlong flow_id,
+    jboolean abort
+) {
+    (void)env;
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h != nullptr) {
+        jiter_local_tcp_close_flow(h, static_cast<uint64_t>(flow_id), abort ? 1u : 0u);
+    }
+#else
+    (void)handle;
+    (void)flow_id;
+    (void)abort;
+#endif
+}
+
+JNIEXPORT void JNICALL
+Java_com_jiter_app_local_LocalTcpNativeBridge_nativeGetStats(
+    JNIEnv* env,
+    jobject thiz,
+    jlong handle,
+    jlongArray out_stats
+) {
+    (void)thiz;
+#if JITER_HAS_RUST_MATH
+    JiterLocalTcpHandle* h = local_tcp_from_handle(handle);
+    if (h == nullptr || out_stats == nullptr || env->GetArrayLength(out_stats) < 4) {
+        return;
+    }
+    uint32_t active = 0;
+    uint64_t total = 0;
+    uint64_t rx_bytes = 0;
+    uint64_t tx_bytes = 0;
+    jiter_local_tcp_stats(h, &active, &total, &rx_bytes, &tx_bytes);
+    jlong out[4] = {
+        static_cast<jlong>(active),
+        static_cast<jlong>(total),
+        static_cast<jlong>(rx_bytes),
+        static_cast<jlong>(tx_bytes),
+    };
+    env->SetLongArrayRegion(out_stats, 0, 4, out);
+#else
+    (void)env;
+    (void)handle;
+    (void)out_stats;
+#endif
+}
+
 } // extern "C"

@@ -1,13 +1,16 @@
 [package]
 name = "jiter-math"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "JITER mathematical engine: Bitwise EWMA (RFC 6298), Linear Cost + Hard Veto, Interleaved XOR FEC, and Adaptive Controller"
+description = "JITER Rust core: Bitwise EWMA (RFC 6298), Linear Cost + Hard Veto, Interleaved XOR FEC, Adaptive Controller, and smoltcp user-space Local TCP stack"
 license = "MIT"
 
 [lib]
 name = "jiter_math"
 crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+smoltcp = { version = "0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-tcp-reno"] }
 
 [profile.release]
 opt-level = "z"

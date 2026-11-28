@@ -25,6 +25,8 @@ import com.jiter.app.engine.RouteChoice
 import com.jiter.app.engine.SessionSnapshot
 import com.jiter.app.engine.SessionState
 import com.jiter.app.engine.TrafficProfile
+import com.jiter.app.local.LocalTcpNativeBridge
+import com.jiter.app.local.LocalTrafficShaper
 import com.jiter.app.network.NetworkMonitor
 import com.jiter.app.notification.StatusNotification
 import com.jiter.app.relay.ControlPlaneClient
@@ -45,14 +47,22 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Single merged VpnService + Foreground Service owning:
- *  - Stage 5 Zero-Config Control Plane Bootstrap (auto node selection + multi-node failover)
+ *  - Stage 6 Hybrid Auto-Selection:
+ *      Mode A — Full AEAD Relay (`0.0.0.0/0` + DNS + IPv6 shield + ChaCha20-Poly1305 + XOR FEC)
+ *               when a healthy Control Plane or manual Relay VPS is available.
+ *      Mode B — Local Traffic Shaper (`0.0.0.0/0` + Native Rust `smoltcp` TCP + Non-blocking UDP
+ *               NAT + DNS Tier-0 Fast-Path + TCP Background Pacer) with zero VPS required!
  *  - Stage 5 Packet-Driven Auto-Profile Engine (Android OS Category UID + TUN traffic flow)
- *  - Stage 4 Full Internet Tunnel (`0.0.0.0/0` + DNS + IPv6 leak shield) & Diagnostic TUN modes
  *  - Live IPv4 data-plane pump (UID classifier -> C IPv4 parser -> C++ slab Pool/Scheduler)
- *  - Protected UDP Relay Client (ECDHE P-256 + PSK + ChaCha20-Poly1305 AEAD + XOR FEC)
  *  - Network sensing and Rust/C++/C/Kotlin closed-loop adaptive controller
  */
 class JiterVpnService : VpnService() {
+
+    private enum class ActiveTunMode {
+        DIAGNOSTIC,
+        LOCAL_SHAPER,
+        FULL_AEAD_RELAY,
+    }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -62,6 +72,7 @@ class JiterVpnService : VpnService() {
     private lateinit var uidFlowClassifier: UidFlowClassifier
     private lateinit var trafficAutoProfileDetector: TrafficAutoProfileDetector
     private lateinit var relayClient: RelayTunnelClient
+    private lateinit var localShaper: LocalTrafficShaper
 
     private val engineLock = Any()
     private val tunWriteLock = Any()
@@ -75,12 +86,17 @@ class JiterVpnService : VpnService() {
 
     private val relayReconnectNeeded = AtomicBoolean(false)
     private val localTunTxCount = AtomicLong(0L)
+    private val rttHistoryLock = Any()
+    private val rttHistoryWindow = ArrayDeque<Double>(64)
 
     @Volatile
     private var isRunning: Boolean = false
 
     @Volatile
     private var fullInternetTunnelActive: Boolean = false
+
+    @Volatile
+    private var localShaperActive: Boolean = false
 
     @Volatile
     private var controlPlaneActive: Boolean = false
@@ -113,7 +129,12 @@ class JiterVpnService : VpnService() {
         uidFlowClassifier = UidFlowClassifier(this)
         trafficAutoProfileDetector = TrafficAutoProfileDetector()
         relayClient = RelayTunnelClient(
-            onDownlinkPacket = { payload -> writeDownlinkPacketToTun(payload) },
+            onDownlinkPacket = { payload -> writeDownlinkPacketToTun(payload, payload.size) },
+        )
+        localShaper = LocalTrafficShaper(
+            protectDatagram = { sock -> protect(sock) },
+            protectStream = { sock -> protect(sock) },
+            onDownlinkPacket = { buf, len -> writeDownlinkPacketToTun(buf, len) },
         )
     }
 
@@ -181,7 +202,7 @@ class JiterVpnService : VpnService() {
         activeConfig = newConfig
         networkMonitor.updateProbeEndpoint(newConfig.probeHost, newConfig.probePort)
 
-        if (relayChanged) {
+        if (relayChanged && !localShaperActive) {
             relayReconnectNeeded.set(true)
         }
 
@@ -223,9 +244,11 @@ class JiterVpnService : VpnService() {
 
         isRunning = true
         fullInternetTunnelActive = false
+        localShaperActive = false
         controlPlaneActive = false
         activeTunnelIp = DEFAULT_TUN_IPV4
         localTunTxCount.set(0L)
+        synchronized(rttHistoryLock) { rttHistoryWindow.clear() }
         trafficAutoProfileDetector.reset()
         currentFecMode = FecMode.OFF
         currentBgPacerRatio = 1.0
@@ -255,16 +278,17 @@ class JiterVpnService : VpnService() {
         runtimeLabel: String,
     ) {
         var cfg = storedCfg
-        var useFullInternetTun = false
+        var tunMode = ActiveTunMode.DIAGNOSTIC
         var tunnelIp = DEFAULT_TUN_IPV4
         var tunnelMtu = 1280
         var startupNote: String? = null
         val initialProfile = manualProfileOverride ?: TrafficProfile.SAFE_BALANCED
 
-        // Stage 5 Zero-Config Control Plane Bootstrap:
-        // If developer Control Plane URL is set and no manual relay override is active,
-        // automatically fetch healthy nodes and connect with multi-node failover.
-        if (cfg.hasControlPlane() && !cfg.hasCustomRelay()) {
+        val allowRelayAttempt = cfg.tunnelScope == TunnelScope.HYBRID_AUTO ||
+            cfg.tunnelScope == TunnelScope.FULL_INTERNET_TUNNEL
+
+        // 1. Try Mode A: Full AEAD Relay via Zero-Config Control Plane or Manual Relay + PSK
+        if (allowRelayAttempt && cfg.hasControlPlane() && !cfg.hasCustomRelay()) {
             SessionStore.update {
                 it.copy(
                     sessionState = SessionState.CONNECTING,
@@ -279,7 +303,6 @@ class JiterVpnService : VpnService() {
                 appVersion = BuildConfig.VERSION_NAME,
             )
             if (boot != null && boot.nodes.isNotEmpty()) {
-                var connectedNode = false
                 for (node in boot.nodes) {
                     val candidateCfg = ControlPlaneClient.applyToConfig(cfg, node, boot.policy)
                     val ok = relayClient.connect(
@@ -293,66 +316,88 @@ class JiterVpnService : VpnService() {
                         networkMonitor.updateProbeEndpoint(cfg.probeHost, cfg.probePort)
                         controlPlaneActive = true
                         relayReconnectNeeded.set(false)
-                        connectedNode = true
-                        if (cfg.tunnelScope == TunnelScope.FULL_INTERNET_TUNNEL && relayClient.isEncrypted) {
-                            useFullInternetTun = true
+                        if (relayClient.isEncrypted &&
+                            (cfg.tunnelScope == TunnelScope.FULL_INTERNET_TUNNEL ||
+                                cfg.tunnelScope == TunnelScope.HYBRID_AUTO)
+                        ) {
+                            tunMode = ActiveTunMode.FULL_AEAD_RELAY
                             tunnelIp = relayClient.assignedIpv4 ?: DEFAULT_TUN_IPV4
                             tunnelMtu = relayClient.acceptedMtu
                         }
                         break
                     }
                 }
-                if (!connectedNode) {
-                    startupNote = "Relay nodes busy · safe local mode"
+                if (!relayClient.isConnected) {
+                    startupNote = "Relay nodes busy · smart local shaper active"
                 }
             } else {
-                startupNote = "Auto server standby · local mode"
+                startupNote = "Auto server standby · smart local shaper active"
+            }
+        } else if (allowRelayAttempt && cfg.hasCustomRelay() && cfg.hasRelayPsk()) {
+            SessionStore.update {
+                it.copy(
+                    sessionState = SessionState.CONNECTING,
+                    statusDetail = "Connecting encrypted tunnel...",
+                )
+            }
+            val connected = relayClient.connect(
+                config = cfg,
+                profile = initialProfile,
+                socketProtector = { sock -> protect(sock) },
+            )
+            relayReconnectNeeded.set(false)
+            if (connected && relayClient.isEncrypted) {
+                tunMode = ActiveTunMode.FULL_AEAD_RELAY
+                tunnelIp = relayClient.assignedIpv4 ?: DEFAULT_TUN_IPV4
+                tunnelMtu = relayClient.acceptedMtu
+            } else if (cfg.tunnelScope == TunnelScope.FULL_INTERNET_TUNNEL &&
+                cfg.failurePolicy == FailurePolicy.FAIL_CLOSED
+            ) {
+                tunMode = ActiveTunMode.FULL_AEAD_RELAY
+                startupNote = "Relay handshake failed · Fail-Closed lockdown active"
+            } else {
+                startupNote = "Relay unreachable · smart local shaper fallback"
             }
         } else if (cfg.tunnelScope == TunnelScope.FULL_INTERNET_TUNNEL) {
-            // Manual Developer Full Tunnel mode: establish ECDHE P-256 + PSK handshake first
-            if (!cfg.hasCustomRelay() || !cfg.hasRelayPsk()) {
-                if (cfg.failurePolicy == FailurePolicy.FAIL_CLOSED) {
-                    useFullInternetTun = true
-                    startupNote = "Full Tunnel requires Relay + PSK · Fail-Closed lockdown"
-                } else {
-                    useFullInternetTun = false
-                    startupNote = "Full Tunnel requires Relay + PSK · safe diagnostic fallback"
-                }
+            if (cfg.failurePolicy == FailurePolicy.FAIL_CLOSED) {
+                tunMode = ActiveTunMode.FULL_AEAD_RELAY
+                startupNote = "Full Tunnel requires Relay + PSK · Fail-Closed lockdown"
             } else {
-                SessionStore.update {
-                    it.copy(
-                        sessionState = SessionState.CONNECTING,
-                        statusDetail = "Connecting encrypted tunnel...",
-                    )
-                }
-                val connected = relayClient.connect(
-                    config = cfg,
-                    profile = initialProfile,
-                    socketProtector = { sock -> protect(sock) },
-                )
-                relayReconnectNeeded.set(false)
-                if (connected && relayClient.isEncrypted) {
-                    useFullInternetTun = true
-                    tunnelIp = relayClient.assignedIpv4 ?: DEFAULT_TUN_IPV4
-                    tunnelMtu = relayClient.acceptedMtu
-                } else if (cfg.failurePolicy == FailurePolicy.FAIL_CLOSED) {
-                    useFullInternetTun = true
-                    startupNote = "Relay handshake failed · Fail-Closed lockdown active"
-                } else {
-                    useFullInternetTun = false
-                    startupNote = "Relay unreachable · Fail-Open local fallback"
-                }
+                startupNote = "Full Tunnel requires Relay + PSK · safe diagnostic fallback"
             }
         }
 
-        if (!isRunning) return
+        // 2. Mode B (Stage 6 Hybrid Fallback / Local Shaper):
+        //    Whenever no VPS AEAD tunnel is active and scope allows Hybrid/Local, start the
+        //    native smoltcp + non-blocking UDP Local Traffic Shaper (0.0.0.0/0, zero VPS needed!)
+        val wantsLocalShaper = tunMode != ActiveTunMode.FULL_AEAD_RELAY &&
+            (cfg.tunnelScope == TunnelScope.HYBRID_AUTO ||
+                cfg.tunnelScope == TunnelScope.LOCAL_SHAPER_ONLY)
+
+        if (wantsLocalShaper) {
+            if (LocalTcpNativeBridge.isSupported() && localShaper.start(mtu = tunnelMtu)) {
+                tunMode = ActiveTunMode.LOCAL_SHAPER
+                localShaperActive = true
+                relayReconnectNeeded.set(false)
+            } else {
+                tunMode = ActiveTunMode.DIAGNOSTIC
+                localShaperActive = false
+                startupNote = startupNote ?: "Native local stack unavailable · diagnostic fallback"
+            }
+        }
+
+        if (!isRunning) {
+            localShaper.stop()
+            return
+        }
 
         val pfd = establishTun(
             localIpv4 = tunnelIp,
             mtu = tunnelMtu,
-            fullInternetRoute = useFullInternetTun,
+            mode = tunMode,
         )
         if (pfd == null) {
+            localShaper.stop()
             SessionStore.update {
                 it.copy(
                     sessionState = SessionState.ERROR,
@@ -364,7 +409,8 @@ class JiterVpnService : VpnService() {
         }
 
         tunInterface = pfd
-        fullInternetTunnelActive = useFullInternetTun
+        fullInternetTunnelActive = (tunMode == ActiveTunMode.FULL_AEAD_RELAY)
+        localShaperActive = (tunMode == ActiveTunMode.LOCAL_SHAPER)
         activeTunnelIp = tunnelIp
         synchronized(tunWriteLock) {
             tunOutStream = FileOutputStream(pfd.fileDescriptor)
@@ -373,16 +419,20 @@ class JiterVpnService : VpnService() {
         val activeInit = SessionStore.snapshot.value.copy(
             sessionState = SessionState.ACTIVE,
             controlPlaneActive = controlPlaneActive,
+            localShaperActive = localShaperActive,
             relayConnected = relayClient.isConnected,
             relayEncrypted = relayClient.isEncrypted,
-            fullInternetTunnelActive = useFullInternetTun,
+            fullInternetTunnelActive = fullInternetTunnelActive,
             assignedTunnelIp = tunnelIp,
             relayRegion = relayClient.stats().region,
             backendSummary = cfg.summaryLabel(),
-            statusDetail = startupNote ?: if (useFullInternetTun) {
-                "Full Tunnel AEAD active ($tunnelIp) · $runtimeLabel"
-            } else {
-                "TUN active · $runtimeLabel"
+            statusDetail = startupNote ?: when (tunMode) {
+                ActiveTunMode.FULL_AEAD_RELAY ->
+                    "Full Tunnel AEAD active ($tunnelIp) · $runtimeLabel"
+                ActiveTunMode.LOCAL_SHAPER ->
+                    "Local Traffic Shaper active (No-VPS) · $runtimeLabel"
+                ActiveTunMode.DIAGNOSTIC ->
+                    "Diagnostic TUN active · $runtimeLabel"
             },
         )
         SessionStore.update { activeInit }
@@ -392,7 +442,7 @@ class JiterVpnService : VpnService() {
             synchronized(engineLock) {
                 engineAdapter?.resetBaseline(null)
             }
-            if (activeConfig.hasCustomRelay()) {
+            if (!localShaperActive && activeConfig.hasCustomRelay()) {
                 relayReconnectNeeded.set(true)
             }
             SessionStore.update { current ->
@@ -414,32 +464,49 @@ class JiterVpnService : VpnService() {
     private fun establishTun(
         localIpv4: String,
         mtu: Int,
-        fullInternetRoute: Boolean,
+        mode: ActiveTunMode,
     ): ParcelFileDescriptor? {
         return try {
             val builder = Builder()
-                .setSession(if (fullInternetRoute) "JITER Full AEAD Tunnel" else "JITER Adaptive Tunnel")
+                .setSession(
+                    when (mode) {
+                        ActiveTunMode.FULL_AEAD_RELAY -> "JITER Full AEAD Tunnel"
+                        ActiveTunMode.LOCAL_SHAPER -> "JITER Local Traffic Shaper"
+                        ActiveTunMode.DIAGNOSTIC -> "JITER Diagnostic Monitor"
+                    },
+                )
                 .setMtu(mtu.coerceIn(576, 1400))
                 .setBlocking(true)
                 .addAddress(localIpv4, 32)
 
-            // Exclude JITER's own process so relay UDP sockets & probes never loop into TUN
+            // Exclude JITER's own process so outbound sockets & probes never loop into TUN
             try {
                 builder.addDisallowedApplication(packageName)
             } catch (_: Exception) {
                 // VpnService.protect() still shields every socket
             }
 
-            if (fullInternetRoute) {
-                builder
-                    .addRoute("0.0.0.0", 0)
-                    .addDnsServer("1.1.1.1")
-                    .addDnsServer("8.8.8.8")
-                    // IPv6 leak shield: prevents unencrypted IPv6 DNS/traffic bypassing IPv4 tunnel
-                    .addAddress("fd77:0:0:1::2", 128)
-                    .addRoute("::", 0)
-            } else {
-                builder.addRoute("10.77.0.0", 24)
+            when (mode) {
+                ActiveTunMode.FULL_AEAD_RELAY -> {
+                    builder
+                        .addRoute("0.0.0.0", 0)
+                        .addDnsServer("1.1.1.1")
+                        .addDnsServer("8.8.8.8")
+                        // IPv6 leak shield: prevents unencrypted IPv6 DNS/traffic bypassing IPv4 tunnel
+                        .addAddress("fd77:0:0:1::2", 128)
+                        .addRoute("::", 0)
+                }
+                ActiveTunMode.LOCAL_SHAPER -> {
+                    // Captures all IPv4 app traffic for local 3-tier priority shaping & TCP BG pacing
+                    // while leaving carrier IPv6/VoLTE/IMS untouched.
+                    builder
+                        .addRoute("0.0.0.0", 0)
+                        .addDnsServer("1.1.1.1")
+                        .addDnsServer("8.8.8.8")
+                }
+                ActiveTunMode.DIAGNOSTIC -> {
+                    builder.addRoute("10.77.0.0", 24)
+                }
             }
 
             builder.establish()
@@ -449,11 +516,12 @@ class JiterVpnService : VpnService() {
     }
 
     /**
-     * Stage 5 Real TUN Data-Plane Loop:
+     * Stage 6 Real TUN Data-Plane Loop:
      *   TUN fd -> Android OS Category UID classifier -> C IPv4 parser
      *          -> C++ slab PacketPool + 3-tier TrafficScheduler
      *          -> Live TrafficAutoProfileDetector (zero Usage Access needed!)
-     *          -> Protected UDP Relay (ChaCha20-Poly1305 AEAD + GF(2) XOR FEC)
+     *          -> Mode A: Protected UDP Relay (AEAD + XOR FEC)
+     *          -> Mode B: Local Traffic Shaper (Rust smoltcp TCP + Non-blocking UDP + TCP BG Pacer)
      */
     private fun runTunDataPlanePump(pfd: ParcelFileDescriptor) {
         val inStream = FileInputStream(pfd.fileDescriptor)
@@ -486,7 +554,9 @@ class JiterVpnService : VpnService() {
                                 uidMatched = uidMatched,
                                 nowMs = nowMs,
                             )
-                            if (relayClient.isConnected) {
+                            if (localShaperActive) {
+                                localShaper.submitScheduledPacket(txBuf, pktLen, tier)
+                            } else if (relayClient.isConnected) {
                                 relayClient.sendDataPacket(
                                     trafficTier = tier,
                                     rawIpv4 = txBuf,
@@ -504,11 +574,11 @@ class JiterVpnService : VpnService() {
         }
     }
 
-    private fun writeDownlinkPacketToTun(payload: ByteArray) {
-        if (!isRunning || payload.isEmpty()) return
+    private fun writeDownlinkPacketToTun(payload: ByteArray, length: Int) {
+        if (!isRunning || length <= 0 || length > payload.size) return
         synchronized(tunWriteLock) {
             try {
-                tunOutStream?.write(payload)
+                tunOutStream?.write(payload, 0, length)
             } catch (_: Exception) {
                 // Ignore write failure during teardown
             }
@@ -538,8 +608,8 @@ class JiterVpnService : VpnService() {
                 else -> TrafficProfile.SAFE_BALANCED to "Standby"
             }
 
-            // Handle dynamic Relay connect / live endpoint or PSK hot-swap / disconnect
-            if (cfg.hasCustomRelay()) {
+            // Handle dynamic Relay connect / live endpoint or PSK hot-swap when not in Local Shaper mode
+            if (!localShaperActive && cfg.hasCustomRelay()) {
                 val shouldReconnect = relayReconnectNeeded.getAndSet(false) ||
                     !relayClient.matchesConfig(cfg) ||
                     !relayClient.isConnected
@@ -553,7 +623,7 @@ class JiterVpnService : VpnService() {
                         persistentWarning = null
                     }
                 }
-            } else if (relayClient.isConnected || relayReconnectNeeded.getAndSet(false)) {
+            } else if (!localShaperActive && (relayClient.isConnected || relayReconnectNeeded.getAndSet(false))) {
                 relayClient.disconnect(sendGoodbye = true)
             }
 
@@ -563,7 +633,7 @@ class JiterVpnService : VpnService() {
                 packetAssessment.observedGoodputMbps ?: 0.0,
             ).takeIf { it > 0.0 } ?: sample.estimatedThroughputMbps
 
-            val relayProbe = if (cfg.hasCustomRelay()) {
+            val relayProbe = if (!localShaperActive && cfg.hasCustomRelay()) {
                 relayClient.probeRelay(
                     profile = effectiveProfile,
                     fecMode = currentFecMode,
@@ -591,19 +661,23 @@ class JiterVpnService : VpnService() {
             val (runtimeLabel, engineOut) = stepOut
             val baseDecision = engineOut.decision
 
-            val effectiveFec = when (cfg.fecPolicy) {
-                FecPolicy.AUTO_ADAPTIVE -> baseDecision.fecMode
-                FecPolicy.FORCE_OFF -> FecMode.OFF
-                FecPolicy.FORCE_K2_LOW_LAT -> {
+            val effectiveFec = when {
+                localShaperActive -> FecMode.OFF // XOR FEC requires remote jiter-relay endpoint
+                cfg.fecPolicy == FecPolicy.AUTO_ADAPTIVE -> baseDecision.fecMode
+                cfg.fecPolicy == FecPolicy.FORCE_OFF -> FecMode.OFF
+                cfg.fecPolicy == FecPolicy.FORCE_K2_LOW_LAT -> {
                     if (effectiveProfile == TrafficProfile.GAME) FecMode.XOR_K2_INTERLEAVED
                     else FecMode.OFF
                 }
+                else -> baseDecision.fecMode
             }
 
             currentFecMode = effectiveFec
             currentBgPacerRatio = baseDecision.bgPacerRatio
 
-            if (relayClient.isConnected) {
+            if (localShaperActive) {
+                localShaper.updatePacer(baseDecision.bgPacerRatio, effectiveBandwidthMbps)
+            } else if (relayClient.isConnected) {
                 relayClient.syncPolicy(
                     profile = effectiveProfile,
                     fecMode = effectiveFec,
@@ -613,6 +687,7 @@ class JiterVpnService : VpnService() {
             }
 
             val effectiveRoute = when {
+                localShaperActive -> RouteChoice.NATIVE
                 fullInternetTunnelActive && relayClient.isConnected -> RouteChoice.RELAY
                 cfg.routingMode == RoutingMode.PRIVACY_ALWAYS_TUNNEL && relayClient.isConnected ->
                     RouteChoice.RELAY
@@ -620,7 +695,7 @@ class JiterVpnService : VpnService() {
                 else -> baseDecision.selectedRoute
             }
 
-            val relayDownLockdown = cfg.hasCustomRelay() &&
+            val relayDownLockdown = !localShaperActive && cfg.hasCustomRelay() &&
                 (cfg.routingMode == RoutingMode.PRIVACY_ALWAYS_TUNNEL || fullInternetTunnelActive) &&
                 cfg.failurePolicy == FailurePolicy.FAIL_CLOSED &&
                 !relayClient.isConnected
@@ -633,12 +708,33 @@ class JiterVpnService : VpnService() {
             }
 
             val relayStats = relayClient.stats()
+            val localStats = localShaper.stats()
+
+            val totalTx = if (localShaperActive) {
+                maxOf(localTunTxCount.get(), localStats.txPackets)
+            } else {
+                maxOf(localTunTxCount.get(), relayStats.txPackets)
+            }
+            val totalRx = if (localShaperActive) localStats.rxPackets else relayStats.rxPackets
+
+            val latestRttForChart = sample.rttMs ?: engineOut.srttMs
+            val historySnapshot = synchronized(rttHistoryLock) {
+                if (latestRttForChart != null && latestRttForChart.isFinite() && latestRttForChart > 0.0) {
+                    if (rttHistoryWindow.size >= 60) {
+                        rttHistoryWindow.removeFirst()
+                    }
+                    rttHistoryWindow.addLast(latestRttForChart)
+                }
+                rttHistoryWindow.toList()
+            }
 
             val detail = buildString {
                 if (sample.networkType == "Offline") {
                     append("No active internet (${cfg.failurePolicy.label})")
                 } else if (relayDownLockdown) {
                     append("Relay unreachable · Fail-Closed lockdown active")
+                } else if (localShaperActive) {
+                    append("Local Shaper (${localStats.activeUdpFlows}u/${localStats.activeTcpFlows}t) · $detectionSource")
                 } else if (persistentWarning != null && !relayStats.connected) {
                     append(persistentWarning)
                 } else if (relayStats.connected && relayStats.region != null) {
@@ -678,15 +774,19 @@ class JiterVpnService : VpnService() {
                 engineRuntimeLabel = runtimeLabel,
                 backendSummary = cfg.summaryLabel(),
                 controlPlaneActive = controlPlaneActive,
+                localShaperActive = localShaperActive,
+                localActiveFlows = localStats.activeFlows,
+                localPacedBytes = localStats.pacedBackgroundBytes,
                 relayConnected = relayStats.connected,
                 relayEncrypted = relayStats.encrypted,
                 fullInternetTunnelActive = fullInternetTunnelActive,
                 assignedTunnelIp = if (fullInternetTunnelActive) activeTunnelIp else relayStats.assignedIpv4,
                 relayRegion = relayStats.region,
                 relayRttMs = relayProbe?.rttMs ?: relayStats.relayRttMs,
-                tunTxPackets = maxOf(localTunTxCount.get(), relayStats.txPackets),
-                tunRxPackets = relayStats.rxPackets,
+                tunTxPackets = totalTx,
+                tunRxPackets = totalRx,
                 fecRecoveredPackets = relayStats.fecRecoveredTotal,
+                rttHistoryMs = historySnapshot,
                 lastSampleTimestampMs = SystemClock.elapsedRealtime(),
                 statusDetail = detail,
                 reasonCodes = baseDecision.reasonCodes,
@@ -739,6 +839,7 @@ class JiterVpnService : VpnService() {
     private fun stopSessionInternal(callStopSelf: Boolean) {
         isRunning = false
         fullInternetTunnelActive = false
+        localShaperActive = false
         controlPlaneActive = false
         sessionJob?.cancel()
         sessionJob = null
@@ -746,6 +847,9 @@ class JiterVpnService : VpnService() {
         tunPumpJob = null
         networkMonitor.stopObservingNetwork()
         trafficAutoProfileDetector.reset()
+        synchronized(rttHistoryLock) { rttHistoryWindow.clear() }
+
+        localShaper.stop()
 
         // Send authenticated/plain GOODBYE so the Relay Edge wipes RAM session immediately
         relayClient.disconnect(sendGoodbye = true)

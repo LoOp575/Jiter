@@ -11,13 +11,13 @@ android {
         applicationId = "com.jiter.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.6.0-stage5-onetap"
+        versionCode = 6
+        versionName = "0.7.1-stage6-redesign"
 
         val defaultControlUrl = (project.findProperty("jiterControlPlaneUrl") as String?)
             ?.trim()
             ?.replace("\"", "")
-            ?: ""
+            ?: "https://jiter-control-plane-two.vercel.app"
         val defaultControlKey = (project.findProperty("jiterControlPlaneAppKey") as String?)
             ?.trim()
             ?.replace("\"", "")

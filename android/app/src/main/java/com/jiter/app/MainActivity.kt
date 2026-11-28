@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.ColorStateList
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.VpnService
 import android.os.Build
@@ -14,6 +15,8 @@ import android.view.LayoutInflater
 import android.view.View
 import android.widget.ArrayAdapter
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
@@ -43,6 +46,8 @@ import com.jiter.app.engine.SessionSnapshot
 import com.jiter.app.engine.SessionState
 import com.jiter.app.engine.TrafficProfile
 import com.jiter.app.state.SessionStore
+import com.jiter.app.ui.LatencyRingView
+import com.jiter.app.ui.LatencySparklineView
 import com.jiter.app.vpn.JiterVpnService
 import kotlinx.coroutines.launch
 import java.util.Locale
@@ -62,13 +67,24 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var appContextDetector: AppContextDetector
 
-    private lateinit var tvBrandTitle: TextView
-    private lateinit var btnToggleLanguage: MaterialButton
-    private lateinit var statusLineIndicator: View
-    private lateinit var btnGoStop: MaterialButton
+    private lateinit var llBrandHeader: LinearLayout
+    private lateinit var btnLanguageSwitch: MaterialButton
+    private lateinit var flRingContainer: FrameLayout
+    private lateinit var latencyRingView: LatencyRingView
+    private lateinit var tvLatencyValue: TextView
+    private lateinit var tvLatencyUnit: TextView
+    private lateinit var tvLatencyLabel: TextView
+    private lateinit var viewStatusDot: View
     private lateinit var tvMainStatus: TextView
-    private lateinit var tvActivityBadge: TextView
     private lateinit var tvMainSubtitle: TextView
+    private lateinit var tvSparklineTrend: TextView
+    private lateinit var latencySparklineView: LatencySparklineView
+    private lateinit var tvModeAuto: TextView
+    private lateinit var tvModeGame: TextView
+    private lateinit var tvModeStream: TextView
+    private lateinit var tvModeDownload: TextView
+    private lateinit var tvModeCaption: TextView
+    private lateinit var btnPrimaryAction: MaterialButton
 
     // Hidden 5-tap Developer Console state
     private var devTapCount = 0
@@ -141,23 +157,34 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun bindViews() {
-        tvBrandTitle = findViewById(R.id.tvBrandTitle)
-        btnToggleLanguage = findViewById(R.id.btnToggleLanguage)
-        statusLineIndicator = findViewById(R.id.statusLineIndicator)
-        btnGoStop = findViewById(R.id.btnGoStop)
+        llBrandHeader = findViewById(R.id.llBrandHeader)
+        btnLanguageSwitch = findViewById(R.id.btnLanguageSwitch)
+        flRingContainer = findViewById(R.id.flRingContainer)
+        latencyRingView = findViewById(R.id.latencyRingView)
+        tvLatencyValue = findViewById(R.id.tvLatencyValue)
+        tvLatencyUnit = findViewById(R.id.tvLatencyUnit)
+        tvLatencyLabel = findViewById(R.id.tvLatencyLabel)
+        viewStatusDot = findViewById(R.id.viewStatusDot)
         tvMainStatus = findViewById(R.id.tvMainStatus)
-        tvActivityBadge = findViewById(R.id.tvActivityBadge)
         tvMainSubtitle = findViewById(R.id.tvMainSubtitle)
+        tvSparklineTrend = findViewById(R.id.tvSparklineTrend)
+        latencySparklineView = findViewById(R.id.latencySparklineView)
+        tvModeAuto = findViewById(R.id.tvModeAuto)
+        tvModeGame = findViewById(R.id.tvModeGame)
+        tvModeStream = findViewById(R.id.tvModeStream)
+        tvModeDownload = findViewById(R.id.tvModeDownload)
+        tvModeCaption = findViewById(R.id.tvModeCaption)
+        btnPrimaryAction = findViewById(R.id.btnPrimaryAction)
     }
 
     private fun setupListeners() {
-        btnToggleLanguage.setOnClickListener {
+        btnLanguageSwitch.setOnClickListener {
             val next = LanguageManager.toggleIndonesianEnglish()
             LanguageManager.apply(next)
             notifyServiceConfigChanged()
         }
 
-        btnGoStop.setOnClickListener {
+        val toggleSession = View.OnClickListener {
             val state = SessionStore.snapshot.value.sessionState
             if (isSessionActive(state)) {
                 stopJiterService()
@@ -165,9 +192,16 @@ class MainActivity : AppCompatActivity() {
                 beginStartFlow()
             }
         }
+        btnPrimaryAction.setOnClickListener(toggleSession)
+        flRingContainer.setOnClickListener(toggleSession)
+
+        tvModeAuto.setOnClickListener { sendProfileOverride(null) }
+        tvModeGame.setOnClickListener { sendProfileOverride(TrafficProfile.GAME) }
+        tvModeStream.setOnClickListener { sendProfileOverride(TrafficProfile.STREAMING) }
+        tvModeDownload.setOnClickListener { sendProfileOverride(TrafficProfile.DOWNLOAD) }
 
         // Hidden 5-tap unlock for Developer Console & Swappable Backend Controls
-        tvBrandTitle.setOnClickListener {
+        llBrandHeader.setOnClickListener {
             val now = SystemClock.elapsedRealtime()
             if (now - lastDevTapMs > DEV_TAP_WINDOW_MS) {
                 devTapCount = 0
@@ -194,7 +228,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun refreshLanguageToggleLabel() {
         val next = LanguageManager.toggleIndonesianEnglish()
-        btnToggleLanguage.text = if (next == AppLanguage.INDONESIAN) {
+        btnLanguageSwitch.text = if (next == AppLanguage.INDONESIAN) {
             getString(R.string.lang_switch_id)
         } else {
             getString(R.string.lang_switch_en)
@@ -203,93 +237,202 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderMainScreen(snapshot: SessionSnapshot) {
         val active = isSessionActive(snapshot.sessionState)
+        val connecting = snapshot.sessionState == SessionState.STARTING ||
+            snapshot.sessionState == SessionState.CONNECTING
 
-        val indicatorColorRes = when {
-            !active -> R.color.jiter_unknown
-            snapshot.sessionState == SessionState.STARTING ||
-                snapshot.sessionState == SessionState.CONNECTING -> R.color.jiter_accent
-            snapshot.qualityState == QualityState.GREEN -> R.color.jiter_green
-            snapshot.qualityState == QualityState.YELLOW -> R.color.jiter_yellow
-            snapshot.qualityState == QualityState.RED -> R.color.jiter_red
-            else -> R.color.jiter_accent
-        }
-        val indicatorColor = ContextCompat.getColor(this, indicatorColorRes)
-        (statusLineIndicator.background as? GradientDrawable)?.setColor(indicatorColor)
-            ?: statusLineIndicator.setBackgroundColor(indicatorColor)
+        val cyan = ContextCompat.getColor(this, R.color.jiter_cyan)
+        val green = ContextCompat.getColor(this, R.color.jiter_green)
+        val yellow = ContextCompat.getColor(this, R.color.jiter_yellow)
+        val red = ContextCompat.getColor(this, R.color.jiter_red)
+        val muted = ContextCompat.getColor(this, R.color.jiter_unknown)
 
-        if (active) {
-            btnGoStop.text = getString(R.string.action_stop)
-            btnGoStop.backgroundTintList = ColorStateList.valueOf(
-                ContextCompat.getColor(this, R.color.jiter_red),
-            )
-        } else {
-            btnGoStop.text = getString(R.string.action_go)
-            btnGoStop.backgroundTintList = ColorStateList.valueOf(
-                ContextCompat.getColor(this, R.color.jiter_green),
-            )
-        }
-
+        // 1. Center Circular Latency Ring + Big Ping Readout
         val displayPingMs = snapshot.relayRttMs ?: snapshot.srttMs
-        tvMainStatus.text = when (snapshot.sessionState) {
-            SessionState.STARTING, SessionState.CONNECTING ->
-                getString(R.string.main_status_connecting)
-            SessionState.ACTIVE, SessionState.RECOVERING -> {
-                if (displayPingMs != null) {
-                    getString(R.string.main_status_active_ping_fmt, displayPingMs.roundToInt())
-                } else {
-                    getString(R.string.main_status_active)
-                }
-            }
-            SessionState.DEGRADED -> getString(R.string.main_status_degraded)
-            SessionState.ERROR -> getString(R.string.main_status_error)
-            SessionState.STOPPED, SessionState.STOPPING -> getString(R.string.main_status_ready)
+        val ringAccent = when {
+            !active -> cyan
+            connecting -> cyan
+            snapshot.sessionState == SessionState.DEGRADED ||
+                snapshot.qualityState == QualityState.RED -> red
+            snapshot.qualityState == QualityState.YELLOW -> yellow
+            else -> cyan
+        }
+        val ringProgress = when {
+            !active -> 0.24f
+            connecting -> 0.35f
+            snapshot.qualityScore != null ->
+                (0.25 + (snapshot.qualityScore.coerceIn(0.0, 100.0) / 100.0) * 0.65).toFloat()
+            else -> 0.72f
+        }
+        latencyRingView.setRingState(
+            progressFraction = ringProgress,
+            accentColor = ringAccent,
+            connecting = connecting,
+        )
+
+        if (active && !connecting && displayPingMs != null) {
+            tvLatencyValue.text = displayPingMs.roundToInt().toString()
+            tvLatencyUnit.visibility = View.VISIBLE
+            tvLatencyLabel.text = getString(R.string.ring_label_latency)
+        } else if (connecting) {
+            tvLatencyValue.text = "--"
+            tvLatencyUnit.visibility = View.VISIBLE
+            tvLatencyLabel.text = getString(R.string.ring_label_connecting)
+        } else {
+            tvLatencyValue.text = "--"
+            tvLatencyUnit.visibility = View.VISIBLE
+            tvLatencyLabel.text = getString(R.string.ring_label_tap_go)
         }
 
-        if (active && snapshot.sessionState != SessionState.STARTING &&
-            snapshot.sessionState != SessionState.CONNECTING
-        ) {
-            tvActivityBadge.visibility = View.VISIBLE
-            tvActivityBadge.text = when {
-                snapshot.manualProfileOverride != null -> getString(
-                    R.string.badge_mode_manual_fmt,
-                    snapshot.manualProfileOverride.displayName,
-                )
-                snapshot.activeProfile == TrafficProfile.GAME && snapshot.concurrentStreamingDetected ->
-                    getString(R.string.badge_mode_game_streaming)
-                snapshot.activeProfile == TrafficProfile.GAME ->
-                    getString(R.string.badge_mode_game)
-                snapshot.activeProfile == TrafficProfile.STREAMING ->
-                    getString(R.string.badge_mode_streaming)
-                snapshot.activeProfile == TrafficProfile.DOWNLOAD ->
-                    getString(R.string.badge_mode_download)
-                else -> getString(R.string.badge_mode_balanced)
-            }
-        } else {
-            tvActivityBadge.visibility = View.GONE
+        // 2. Inline Status Dot + Status Word + Short Protection Subtitle
+        val dotColor = when {
+            !active -> muted
+            connecting -> cyan
+            snapshot.sessionState == SessionState.DEGRADED ||
+                snapshot.qualityState == QualityState.RED -> red
+            snapshot.qualityState == QualityState.YELLOW -> yellow
+            else -> green
+        }
+        (viewStatusDot.background as? GradientDrawable)?.setColor(dotColor)
+            ?: viewStatusDot.setBackgroundColor(dotColor)
+
+        tvMainStatus.text = when {
+            snapshot.sessionState == SessionState.STARTING ||
+                snapshot.sessionState == SessionState.CONNECTING ->
+                getString(R.string.main_status_connecting)
+            snapshot.sessionState == SessionState.ERROR ->
+                getString(R.string.main_status_error)
+            !active ->
+                getString(R.string.main_status_ready)
+            snapshot.sessionState == SessionState.DEGRADED ||
+                snapshot.qualityState == QualityState.RED ->
+                getString(R.string.main_status_degraded)
+            snapshot.qualityState == QualityState.YELLOW ->
+                getString(R.string.main_status_moderate)
+            else ->
+                getString(R.string.main_status_stable)
         }
 
         tvMainSubtitle.text = when {
-            snapshot.sessionState == SessionState.STOPPED -> {
+            !active -> {
                 if (snapshot.statusDetail == getString(R.string.status_vpn_declined)) {
                     snapshot.statusDetail
                 } else {
-                    getString(R.string.main_subtitle_idle)
+                    getString(R.string.main_subtitle_short_idle)
                 }
             }
-            snapshot.sessionState == SessionState.STARTING ||
-                snapshot.sessionState == SessionState.CONNECTING ->
-                getString(R.string.main_subtitle_connecting)
-            snapshot.networkType == "Offline" ->
-                getString(R.string.main_subtitle_offline)
+            connecting -> getString(R.string.main_subtitle_short_connecting)
+            snapshot.networkType == "Offline" -> getString(R.string.main_subtitle_short_offline)
             snapshot.sessionState == SessionState.DEGRADED ||
                 snapshot.qualityState == QualityState.RED ->
-                getString(R.string.main_subtitle_degraded)
+                getString(R.string.main_subtitle_short_degraded)
             snapshot.qualityState == QualityState.YELLOW ->
-                getString(R.string.main_subtitle_moderate)
+                getString(R.string.main_subtitle_short_moderate)
             snapshot.relayConnected && snapshot.relayEncrypted ->
-                getString(R.string.main_subtitle_stable_encrypted_fmt, snapshot.relayRegion ?: "EDGE")
+                getString(R.string.main_subtitle_short_encrypted_fmt, snapshot.relayRegion ?: "EDGE")
+            snapshot.localShaperActive ->
+                getString(R.string.main_subtitle_short_shaper)
             else ->
-                getString(R.string.main_subtitle_stable_local)
+                getString(R.string.main_subtitle_short_local)
+        }
+
+        // 3. Live 60-Second Latency Sparkline + Trend Label
+        val sparkColor = when {
+            !active -> muted
+            snapshot.sessionState == SessionState.DEGRADED ||
+                snapshot.qualityState == QualityState.RED -> red
+            snapshot.qualityState == QualityState.YELLOW -> yellow
+            else -> cyan
+        }
+        latencySparklineView.setSeries(
+            values = if (active) snapshot.rttHistoryMs else emptyList(),
+            accentColor = sparkColor,
+        )
+        tvSparklineTrend.text = computeSparklineTrendLabel(active, snapshot)
+
+        // 4. 4-Segment Mode Pill Bar (Auto | Game | Stream | Download) + Dynamic Caption
+        renderModePillBar(snapshot)
+
+        // 5. Primary Action Button (GO Cyan Pill <-> Dark Crimson Outlined STOP Pill)
+        if (active) {
+            val stopBg = ContextCompat.getColor(this, R.color.jiter_stop_bg)
+            val stopStroke = ContextCompat.getColor(this, R.color.jiter_stop_stroke)
+            val stopText = ContextCompat.getColor(this, R.color.jiter_stop_text)
+            btnPrimaryAction.text = getString(R.string.action_stop)
+            btnPrimaryAction.setTextColor(stopText)
+            btnPrimaryAction.backgroundTintList = ColorStateList.valueOf(stopBg)
+            btnPrimaryAction.strokeColor = ColorStateList.valueOf(stopStroke)
+            btnPrimaryAction.setIconResource(R.drawable.ic_action_stop)
+            btnPrimaryAction.iconTint = ColorStateList.valueOf(stopText)
+        } else {
+            val goText = ContextCompat.getColor(this, R.color.jiter_cyan_dark)
+            btnPrimaryAction.text = getString(R.string.action_go)
+            btnPrimaryAction.setTextColor(goText)
+            btnPrimaryAction.backgroundTintList = ColorStateList.valueOf(cyan)
+            btnPrimaryAction.strokeColor = ColorStateList.valueOf(cyan)
+            btnPrimaryAction.setIconResource(R.drawable.ic_action_play)
+            btnPrimaryAction.iconTint = ColorStateList.valueOf(goText)
+        }
+    }
+
+    private fun computeSparklineTrendLabel(active: Boolean, snapshot: SessionSnapshot): String {
+        if (!active || snapshot.rttHistoryMs.isEmpty()) {
+            return getString(R.string.sparkline_trend_idle)
+        }
+        val jit = snapshot.jitterMs ?: 0.0
+        val bloat = snapshot.bufferbloatMs ?: 0.0
+        return when {
+            snapshot.qualityState == QualityState.RED || jit >= 25.0 || bloat >= 60.0 ->
+                getString(R.string.sparkline_trend_spike)
+            snapshot.qualityState == QualityState.YELLOW || jit >= 10.0 || bloat >= 25.0 ->
+                getString(R.string.sparkline_trend_variable)
+            else ->
+                getString(R.string.sparkline_trend_steady)
+        }
+    }
+
+    private fun renderModePillBar(snapshot: SessionSnapshot) {
+        val selectedOverride = snapshot.manualProfileOverride
+        val tabs = listOf(
+            tvModeAuto to null,
+            tvModeGame to TrafficProfile.GAME,
+            tvModeStream to TrafficProfile.STREAMING,
+            tvModeDownload to TrafficProfile.DOWNLOAD,
+        )
+        val darkText = ContextCompat.getColor(this, R.color.jiter_cyan_dark)
+        val secondaryText = ContextCompat.getColor(this, R.color.jiter_text_secondary)
+
+        for ((tab, profile) in tabs) {
+            val isSelected = selectedOverride == profile
+            if (isSelected) {
+                tab.setBackgroundResource(R.drawable.bg_mode_tab_selected)
+                tab.setTextColor(darkText)
+                tab.setTypeface(null, Typeface.BOLD)
+            } else {
+                tab.background = null
+                tab.setTextColor(secondaryText)
+                tab.setTypeface(null, Typeface.NORMAL)
+            }
+        }
+
+        val active = isSessionActive(snapshot.sessionState)
+        tvModeCaption.text = when (selectedOverride) {
+            TrafficProfile.GAME -> getString(R.string.mode_caption_game)
+            TrafficProfile.STREAMING -> getString(R.string.mode_caption_stream)
+            TrafficProfile.DOWNLOAD -> getString(R.string.mode_caption_download)
+            else -> {
+                if (active && snapshot.activeProfile != TrafficProfile.SAFE_BALANCED) {
+                    val detectedName = if (snapshot.activeProfile == TrafficProfile.GAME &&
+                        snapshot.concurrentStreamingDetected
+                    ) {
+                        "Game + Stream"
+                    } else {
+                        snapshot.activeProfile.displayName
+                    }
+                    getString(R.string.mode_caption_auto_detected_fmt, detectedName)
+                } else {
+                    getString(R.string.mode_caption_auto)
+                }
+            }
         }
     }
 
@@ -388,7 +531,8 @@ class MainActivity : AppCompatActivity() {
             appendLine("Latency : SRTT=$rtt | Relay=$relayRtt | Jitter=$jitter")
             appendLine("Link    : Bloat=$bloat | Loss=$loss | Net=${snapshot.networkType}")
             appendLine("Actuator: FEC=${snapshot.fecMode.label} | BG Pacer=$pacerPct% | Route=${snapshot.selectedRoute.label}")
-            appendLine("Tunnel  : AEAD=${snapshot.relayEncrypted} | FullTUN=${snapshot.fullInternetTunnelActive} | IP=${snapshot.assignedTunnelIp ?: "-"}")
+            appendLine("Tunnel  : AEAD=${snapshot.relayEncrypted} | FullTUN=${snapshot.fullInternetTunnelActive} | LocalShaper=${snapshot.localShaperActive}")
+            appendLine("Local   : ActiveFlows=${snapshot.localActiveFlows} | PacedBG=${snapshot.localPacedBytes / 1024} KB | IP=${snapshot.assignedTunnelIp ?: "-"}")
             appendLine("Relay   : Connected=${snapshot.relayConnected} (${snapshot.relayRegion ?: "-"}) | CP=${snapshot.controlPlaneActive}")
             appendLine("Counters: TX=${snapshot.tunTxPackets} | RX=${snapshot.tunRxPackets} | FEC Recov=${snapshot.fecRecoveredPackets}")
             appendLine("Config  : ${cfg.summaryLabel()}")

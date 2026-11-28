@@ -98,6 +98,9 @@ class StatusNotification(private val context: Context) {
 
         val routeDesc = buildString {
             append(snapshot.selectedRoute.label)
+            if (snapshot.localShaperActive) {
+                append(" [Local Shaper]")
+            }
             if (snapshot.relayEncrypted) {
                 append(" [AEAD]")
             }

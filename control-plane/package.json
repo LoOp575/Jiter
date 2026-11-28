@@ -1,6 +1,6 @@
 {
   "name": "jiter-control-plane",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Swappable zero-config Control Plane for JITER Android client (Vercel / Supabase / Standalone Node.js)",
   "private": true,
   "scripts": {

@@ -10,6 +10,7 @@ pub mod controller;
 pub mod ewma;
 pub mod fec;
 pub mod ffi;
+pub mod local_tcp;
 pub mod scoring;
 
 #[cfg(test)]
