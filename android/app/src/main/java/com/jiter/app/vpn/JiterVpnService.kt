@@ -5,6 +5,7 @@ import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.os.SystemClock
 import androidx.core.app.ServiceCompat
 import com.jiter.app.BuildConfig
@@ -85,9 +86,11 @@ class JiterVpnService : VpnService() {
     private var tunOutStream: FileOutputStream? = null
 
     private var sessionJob: Job? = null
-    private var tunPumpJob: Job? = null
+    @Volatile
+    private var tunPumpThread: Thread? = null
 
     private val relayReconnectNeeded = AtomicBoolean(false)
+    private val baselineResetRequested = AtomicBoolean(false)
     private val localTunTxCount = AtomicLong(0L)
     private val rttHistoryLock = Any()
     private val rttHistoryWindow = ArrayDeque<Double>(64)
@@ -202,6 +205,7 @@ class JiterVpnService : VpnService() {
 
     override fun onDestroy() {
         stopSessionInternal(callStopSelf = false)
+        uidFlowClassifier.shutdown()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -463,6 +467,7 @@ class JiterVpnService : VpnService() {
             synchronized(engineLock) {
                 engineAdapter?.resetBaseline(null)
             }
+            baselineResetRequested.set(true)
             if (!localShaperActive && activeConfig.hasCustomRelay()) {
                 relayReconnectNeeded.set(true)
             }
@@ -474,12 +479,37 @@ class JiterVpnService : VpnService() {
             }
         }
 
-        tunPumpJob?.cancel()
-        tunPumpJob = serviceScope.launch {
-            runTunDataPlanePump(pfd)
-        }
+        startTunDataPlaneThread(pfd)
 
         runClosedLoopMonitor(startupNote)
+    }
+
+    private fun startTunDataPlaneThread(pfd: ParcelFileDescriptor) {
+        stopTunDataPlaneThread()
+        val thread = Thread({
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_DISPLAY)
+            } catch (_: Throwable) {
+                // Best-effort OS priority boost
+            }
+            runTunDataPlanePump(pfd)
+        }, "jiter-tun-pump").apply {
+            isDaemon = true
+            priority = (Thread.MAX_PRIORITY - 1).coerceIn(Thread.NORM_PRIORITY, Thread.MAX_PRIORITY)
+            start()
+        }
+        tunPumpThread = thread
+    }
+
+    private fun stopTunDataPlaneThread() {
+        val thread = tunPumpThread ?: return
+        tunPumpThread = null
+        thread.interrupt()
+        try {
+            thread.join(800L)
+        } catch (_: InterruptedException) {
+            // Ignore interrupt during teardown
+        }
     }
 
     private fun establishTun(
@@ -551,7 +581,7 @@ class JiterVpnService : VpnService() {
         val outTierAndLen = IntArray(2)
 
         try {
-            while (serviceScope.isActive && isRunning) {
+            while (isRunning && !Thread.currentThread().isInterrupted) {
                 val readLen = inStream.read(rxBuf)
                 if (readLen <= 0) {
                     if (!isRunning) break
@@ -650,8 +680,16 @@ class JiterVpnService : VpnService() {
 
     private suspend fun runClosedLoopMonitor(initialFallbackWarning: String?) {
         var persistentWarning = initialFallbackWarning
+        var didStartupWarmup = false
+        val baselineWindow = ArrayDeque<Pair<Long, Double>>(64)
+        var steadyLowJitterStreak = 0
 
         while (serviceScope.isActive && isRunning) {
+            if (baselineResetRequested.getAndSet(false)) {
+                baselineWindow.clear()
+                steadyLowJitterStreak = 0
+            }
+
             val cfg = activeConfig
             val nowElapsedMs = SystemClock.elapsedRealtime()
             val packetAssessment = trafficAutoProfileDetector.evaluate(nowElapsedMs)
@@ -682,11 +720,47 @@ class JiterVpnService : VpnService() {
                 relayClient.disconnect(sendGoodbye = true)
             }
 
-            val sample = networkMonitor.runProbe(socketProtector = { sock -> protect(sock) })
-            val effectiveBandwidthMbps = maxOf(
+            var sample = networkMonitor.runProbe(socketProtector = { sock -> protect(sock) })
+            val firstRtt = sample.rttMs
+            if (!didStartupWarmup && firstRtt != null && isRunning) {
+                didStartupWarmup = true
+                // Warm up 2 extra fast probes (150 ms apart) on session start so RFC 6298 initial
+                // RTTVAR (R/2) settles to true network jitter instead of flashing YELLOW on healthy 4G.
+                synchronized(engineLock) {
+                    engineAdapter?.submitRtt(firstRtt, sample.timestampMs)
+                }
+                recordBaselineSample(baselineWindow, sample.timestampMs, firstRtt)
+                repeat(STARTUP_WARMUP_EXTRA_PROBES) {
+                    if (!isRunning) return@repeat
+                    delay(STARTUP_WARMUP_INTERVAL_MS)
+                    val warm = networkMonitor.runProbe(socketProtector = { sock -> protect(sock) })
+                    val warmRtt = warm.rttMs
+                    if (warmRtt != null) {
+                        synchronized(engineLock) {
+                            engineAdapter?.submitRtt(warmRtt, warm.timestampMs)
+                        }
+                        recordBaselineSample(baselineWindow, warm.timestampMs, warmRtt)
+                        sample = warm
+                    }
+                }
+            } else if (firstRtt != null) {
+                didStartupWarmup = true
+                synchronized(engineLock) {
+                    engineAdapter?.submitRtt(firstRtt, sample.timestampMs)
+                }
+                recordBaselineSample(baselineWindow, sample.timestampMs, firstRtt)
+            }
+
+            val observedThroughputMbps = maxOf(
                 sample.estimatedThroughputMbps ?: 0.0,
                 packetAssessment.observedGoodputMbps ?: 0.0,
-            ).takeIf { it > 0.0 } ?: sample.estimatedThroughputMbps
+            ).takeIf { it > 0.0 }
+            val scorerBandwidthMbps = resolveScorerBandwidthMbps(
+                linkCapacityMbps = sample.linkCapacityMbps,
+                observedThroughputMbps = observedThroughputMbps,
+            )
+            val pacerLinkMbps = scorerBandwidthMbps ?: observedThroughputMbps
+            val displayThroughputMbps = observedThroughputMbps ?: sample.linkCapacityMbps
 
             val relayProbe = if (!localShaperActive && cfg.hasCustomRelay()) {
                 relayClient.probeRelay(
@@ -700,21 +774,45 @@ class JiterVpnService : VpnService() {
 
             val stepOut = synchronized(engineLock) {
                 val adapter = engineAdapter ?: return@synchronized null
-                if (sample.rttMs != null) {
-                    adapter.submitRtt(sample.rttMs, sample.timestampMs)
-                }
                 val res = adapter.step(
                     nowMs = sample.timestampMs,
                     profile = effectiveProfile,
                     lossPct = sample.lossPct,
-                    bandwidthMbps = effectiveBandwidthMbps,
+                    bandwidthMbps = scorerBandwidthMbps,
                     alternateRoute = relayProbe?.routeMetrics,
                 )
+                val srtt = res.srttMs
+                val jit = res.jitterMs
+                val bloat = res.bufferbloatMs
+                if (srtt != null && jit != null && bloat != null &&
+                    jit < STEADY_BASELINE_MAX_JITTER_MS && sample.lossPct == 0.0
+                ) {
+                    steadyLowJitterStreak += 1
+                } else {
+                    steadyLowJitterStreak = 0
+                }
+                if (srtt != null && jit != null && bloat != null && baselineWindow.size >= 2) {
+                    val spanMs = baselineWindow.last().first - baselineWindow.first().first
+                    val windowMinRtt = baselineWindow.minOf { it.second }
+                    if (shouldRecalibrateSteadyBaseline(
+                            bloatMs = bloat,
+                            srttMs = srtt,
+                            jitterMs = jit,
+                            lossPct = sample.lossPct,
+                            steadyStreak = steadyLowJitterStreak,
+                            windowSpanMs = spanMs,
+                            windowMinRttMs = windowMinRtt,
+                        )
+                    ) {
+                        adapter.resetBaseline(windowMinRtt)
+                        steadyLowJitterStreak = 0
+                    }
+                }
                 if (localShaperActive) {
                     // In Mode B Local Shaper, LocalTrafficShaper handles smooth 50 ms TCP rwnd
                     // downlink pacing. Keep the C++ scheduler's outbound queue unthrottled so
                     // outbound TCP ACKs never stall behind a blocking TUN read().
-                    adapter.configureSchedulerPacer(1.0, effectiveBandwidthMbps ?: 25.0)
+                    adapter.configureSchedulerPacer(1.0, pacerLinkMbps ?: 25.0)
                 }
                 Pair(adapter.engineLabel, res)
             } ?: break
@@ -737,13 +835,13 @@ class JiterVpnService : VpnService() {
             currentBgPacerRatio = baseDecision.bgPacerRatio
 
             if (localShaperActive) {
-                localShaper.updatePacer(baseDecision.bgPacerRatio, effectiveBandwidthMbps)
+                localShaper.updatePacer(baseDecision.bgPacerRatio, pacerLinkMbps)
             } else if (relayClient.isConnected) {
                 relayClient.syncPolicy(
                     profile = effectiveProfile,
                     fecMode = effectiveFec,
                     bgPacerRatio = baseDecision.bgPacerRatio,
-                    estimatedLinkMbps = effectiveBandwidthMbps,
+                    estimatedLinkMbps = pacerLinkMbps,
                 )
             }
 
@@ -822,7 +920,7 @@ class JiterVpnService : VpnService() {
                 bufferbloatMs = engineOut.bufferbloatMs,
                 rtoMs = engineOut.rtoMs,
                 lossPct = sample.lossPct,
-                estimatedThroughputMbps = effectiveBandwidthMbps,
+                estimatedThroughputMbps = displayThroughputMbps,
                 activeProfile = effectiveProfile,
                 manualProfileOverride = manualProfileOverride,
                 detectionSource = detectionSource,
@@ -856,11 +954,39 @@ class JiterVpnService : VpnService() {
             SessionStore.update { updated }
             statusNotification.updateIfAllowed(updated)
 
+            val screenInteractive = networkMonitor.isScreenInteractive()
             val nextDelayMs = computeAdaptiveProbeDelayMs(
-                screenInteractive = networkMonitor.isScreenInteractive(),
+                screenInteractive = screenInteractive,
                 qualityState = baseDecision.qualityState,
             )
-            delay(nextDelayMs)
+            if (screenInteractive) {
+                delay(nextDelayMs)
+            } else {
+                // Sleep in 1 s slices when screen is off so unlocking resumes live probing promptly
+                // while keeping background wakeups inside the 10 s EWMA freshness window.
+                var remainingMs = nextDelayMs
+                while (remainingMs > 0L && serviceScope.isActive && isRunning) {
+                    val slice = minOf(remainingMs, SCREEN_OFF_WAKE_CHECK_MS)
+                    delay(slice)
+                    remainingMs -= slice
+                    if (networkMonitor.isScreenInteractive()) {
+                        break
+                    }
+                }
+            }
+        }
+    }
+
+    private fun recordBaselineSample(
+        window: ArrayDeque<Pair<Long, Double>>,
+        timestampMs: Long,
+        rttMs: Double,
+    ) {
+        if (!rttMs.isFinite() || rttMs <= 0.0) return
+        window.addLast(timestampMs to rttMs)
+        val cutoff = timestampMs - BASELINE_ROLLING_WINDOW_MS
+        while (window.isNotEmpty() && window.first().first < cutoff) {
+            window.removeFirst()
         }
     }
 
@@ -869,7 +995,7 @@ class JiterVpnService : VpnService() {
         qualityState: QualityState,
     ): Long {
         if (!screenInteractive) {
-            return 30_000L
+            return 8_000L
         }
         return when (qualityState) {
             QualityState.GREEN -> 2_000L
@@ -904,8 +1030,6 @@ class JiterVpnService : VpnService() {
         controlPlaneActive = false
         sessionJob?.cancel()
         sessionJob = null
-        tunPumpJob?.cancel()
-        tunPumpJob = null
         networkMonitor.stopObservingNetwork()
         trafficAutoProfileDetector.reset()
         uidFlowClassifier.clearCache()
@@ -933,6 +1057,8 @@ class JiterVpnService : VpnService() {
         }
         tunInterface = null
 
+        stopTunDataPlaneThread()
+
         synchronized(engineLock) {
             engineAdapter?.close()
             engineAdapter = null
@@ -956,6 +1082,61 @@ class JiterVpnService : VpnService() {
         const val EXTRA_PROFILE_NAME = "extra_profile_name"
         private const val DEFAULT_TUN_IPV4 = "10.77.0.2"
         private const val LOCAL_SHAPER_MTU = 1500
+        private const val STARTUP_WARMUP_EXTRA_PROBES = 2
+        private const val STARTUP_WARMUP_INTERVAL_MS = 150L
+        private const val SCREEN_OFF_WAKE_CHECK_MS = 1_000L
+        private const val HIGH_THROUGHPUT_PROOF_MBPS = 25.0
+        private const val BASELINE_ROLLING_WINDOW_MS = 90_000L
+        private const val STEADY_BASELINE_MIN_SPAN_MS = 30_000L
+        private const val STEADY_BASELINE_MIN_STREAK = 15
+        private const val STEADY_BASELINE_MAX_JITTER_MS = 6.0
+        private const val STEADY_BASELINE_MIN_BLOAT_MS = 10.0
+        private const val STEADY_BASELINE_MAX_WINDOW_SPREAD_MS = 6.0
+
+        /**
+         * Stage 6.3 Link-Capacity Resolver for Formula #1 Quality Scoring:
+         * Separates actual physical link capacity (`NetworkCapabilities.linkDownstreamBandwidthKbps`)
+         * from low passive app usage (online gaming ~0.15 Mbps, browsing ~0.2 Mbps, YouTube 1080p ~3 Mbps)
+         * so healthy Wi-Fi/4G links NEVER get falsely penalized as congested or starved!
+         *
+         * Observed throughput is only used as a proven LOWER BOUND (raising capacity upward if real
+         * transfers exceed the OS estimate, or proving a >= 25 Mbps link when OS capacity is unavailable).
+         */
+        internal fun resolveScorerBandwidthMbps(
+            linkCapacityMbps: Double?,
+            observedThroughputMbps: Double?,
+        ): Double? {
+            val cleanCap = linkCapacityMbps?.takeIf { it.isFinite() && it > 0.0 }
+            val cleanObs = observedThroughputMbps?.takeIf { it.isFinite() && it > 0.0 }
+            return when {
+                cleanCap != null -> if (cleanObs != null) maxOf(cleanCap, cleanObs) else cleanCap
+                cleanObs != null && cleanObs >= HIGH_THROUGHPUT_PROOF_MBPS -> cleanObs
+                else -> null
+            }
+        }
+
+        /**
+         * Detects permanent calm ISP route / 4G cell-tower baseline shifts (low jitter, 0% loss,
+         * and tight RTT spread across the rolling window for >= 30 s) so `min_rtt` recalibrates
+         * cleanly without ever masking real active bufferbloat.
+         */
+        internal fun shouldRecalibrateSteadyBaseline(
+            bloatMs: Double,
+            srttMs: Double,
+            jitterMs: Double,
+            lossPct: Double,
+            steadyStreak: Int,
+            windowSpanMs: Long,
+            windowMinRttMs: Double,
+        ): Boolean =
+            bloatMs >= STEADY_BASELINE_MIN_BLOAT_MS &&
+                jitterMs < STEADY_BASELINE_MAX_JITTER_MS &&
+                lossPct == 0.0 &&
+                steadyStreak >= STEADY_BASELINE_MIN_STREAK &&
+                windowSpanMs >= STEADY_BASELINE_MIN_SPAN_MS &&
+                windowMinRttMs.isFinite() &&
+                windowMinRttMs > 0.0 &&
+                (srttMs - windowMinRttMs) <= STEADY_BASELINE_MAX_WINDOW_SPREAD_MS
 
         /**
          * Stage 6.2 Auto-Profile Precedence:

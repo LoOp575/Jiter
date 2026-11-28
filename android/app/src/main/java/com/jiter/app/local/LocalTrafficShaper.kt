@@ -125,13 +125,23 @@ class LocalTrafficShaper(
         val tcpBackend = tcpBackendFactory(mtu, System.nanoTime())
 
         val thread = Thread({
+            elevateIoThreadPriority()
             runIoLoop(sel, tcpBackend)
         }, "jiter-local-shaper").apply {
             isDaemon = true
+            priority = (Thread.MAX_PRIORITY - 1).coerceIn(Thread.NORM_PRIORITY, Thread.MAX_PRIORITY)
             start()
         }
         ioThread = thread
         return true
+    }
+
+    private fun elevateIoThreadPriority() {
+        try {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_DISPLAY)
+        } catch (_: Throwable) {
+            // Plain JVM unit tests do not mock android.os.Process
+        }
     }
 
     fun stop() {
@@ -273,7 +283,7 @@ class LocalTrafficShaper(
                     )
                 }
 
-                // 3. Zero-wait poll during active traffic bursts; 5 ms sleep only when idle
+                // 3. Zero-wait poll during active traffic bursts; 4 ms sleep only when idle
                 if (didWork || !outboundQueue.isEmpty()) {
                     sel.selectNow()
                 } else {
@@ -282,7 +292,7 @@ class LocalTrafficShaper(
                         selectorSleeping.set(false)
                         sel.selectNow()
                     } else {
-                        sel.select(5L)
+                        sel.select(4L)
                         selectorSleeping.set(false)
                     }
                 }

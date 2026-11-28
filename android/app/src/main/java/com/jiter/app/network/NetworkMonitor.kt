@@ -16,6 +16,7 @@ data class ProbeSample(
     val lossPct: Double,
     val estimatedThroughputMbps: Double?,
     val networkType: String,
+    val linkCapacityMbps: Double? = null,
 )
 
 /**
@@ -124,6 +125,7 @@ class NetworkMonitor(
         val nowMs = SystemClock.elapsedRealtime()
         val netType = getNetworkType()
         val passiveMbps = samplePassiveThroughputMbps(nowMs)
+        val linkCapMbps = queryLinkCapacityMbps()
 
         if (netType == "Offline") {
             val loss = recordProbeOutcome(success = false)
@@ -133,10 +135,23 @@ class NetworkMonitor(
                 lossPct = loss,
                 estimatedThroughputMbps = null,
                 networkType = netType,
+                linkCapacityMbps = null,
             )
         }
 
-        val rttMs = measureTcpConnectRttMs(socketProtector)
+        val host = probeHost
+        val port = probePort
+        var rttMs = measureTcpConnectRttMs(host, port, probeTimeoutMs, socketProtector)
+        // If using the default 1.1.1.1:443 endpoint and a single SYN hiccups or gets rate-limited,
+        // verify once against secondary 8.8.8.8:443 so single-anycast blips never fake network loss.
+        if (rttMs == null && host == DEFAULT_PROBE_HOST && port == DEFAULT_PROBE_PORT) {
+            rttMs = measureTcpConnectRttMs(
+                host = FALLBACK_PROBE_HOST,
+                port = FALLBACK_PROBE_PORT,
+                timeoutMs = FALLBACK_PROBE_TIMEOUT_MS,
+                socketProtector = socketProtector,
+            )
+        }
         val loss = recordProbeOutcome(success = rttMs != null)
         return ProbeSample(
             timestampMs = nowMs,
@@ -144,16 +159,22 @@ class NetworkMonitor(
             lossPct = loss,
             estimatedThroughputMbps = passiveMbps,
             networkType = netType,
+            linkCapacityMbps = linkCapMbps,
         )
     }
 
-    private fun measureTcpConnectRttMs(socketProtector: ((Socket) -> Boolean)?): Double? {
+    private fun measureTcpConnectRttMs(
+        host: String,
+        port: Int,
+        timeoutMs: Int,
+        socketProtector: ((Socket) -> Boolean)?,
+    ): Double? {
         val socket = Socket()
         return try {
             socket.tcpNoDelay = true
             socketProtector?.invoke(socket)
             val startNs = System.nanoTime()
-            socket.connect(InetSocketAddress(probeHost, probePort), probeTimeoutMs)
+            socket.connect(InetSocketAddress(host, port), timeoutMs)
             val elapsedNs = System.nanoTime() - startNs
             val rttMs = elapsedNs / 1_000_000.0
             if (rttMs.isFinite() && rttMs > 0.0) rttMs else null
@@ -173,9 +194,7 @@ class NetworkMonitor(
             recentProbes.removeFirst()
         }
         recentProbes.addLast(success)
-        if (recentProbes.isEmpty()) return 0.0
-        val failed = recentProbes.count { !it }
-        (failed * 100.0) / recentProbes.size
+        computeWindowLossPct(recentProbes, LOSS_WINDOW_SIZE)
     }
 
     private fun samplePassiveThroughputMbps(nowElapsedMs: Long): Double? {
@@ -200,6 +219,38 @@ class NetworkMonitor(
         return if (mbps >= 0.05) mbps else null
     }
 
+    @Suppress("DEPRECATION")
+    private fun queryLinkCapacityMbps(): Double? {
+        return try {
+            val active = connectivityManager.activeNetwork ?: return null
+            val activeCaps = connectivityManager.getNetworkCapabilities(active)
+            if (activeCaps != null && !activeCaps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                return extractSaneDownstreamMbps(activeCaps)
+            }
+            // When activeNetwork carries TRANSPORT_VPN, inspect the underlying physical transport
+            // so we obtain real Wi-Fi / Cellular link capability instead of VPN sentinel values.
+            var bestMbps: Double? = null
+            for (net in connectivityManager.allNetworks) {
+                val caps = connectivityManager.getNetworkCapabilities(net) ?: continue
+                if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+                if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+                val mbps = extractSaneDownstreamMbps(caps) ?: continue
+                if (bestMbps == null || mbps > bestMbps) {
+                    bestMbps = mbps
+                }
+            }
+            bestMbps ?: activeCaps?.let { extractSaneDownstreamMbps(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun extractSaneDownstreamMbps(caps: NetworkCapabilities): Double? {
+        val kbps = caps.linkDownstreamBandwidthKbps
+        if (kbps !in 1..MAX_SANE_LINK_KBPS) return null
+        return kbps / 1000.0
+    }
+
     private fun queryActiveNetworkType(): String {
         val active = connectivityManager.activeNetwork ?: return "Offline"
         val caps = connectivityManager.getNetworkCapabilities(active) ?: return "Offline"
@@ -216,7 +267,34 @@ class NetworkMonitor(
     companion object {
         const val DEFAULT_PROBE_HOST = "1.1.1.1"
         const val DEFAULT_PROBE_PORT = 443
+        const val FALLBACK_PROBE_HOST = "8.8.8.8"
+        const val FALLBACK_PROBE_PORT = 443
         const val DEFAULT_PROBE_TIMEOUT_MS = 1_500
-        const val LOSS_WINDOW_SIZE = 20
+        const val FALLBACK_PROBE_TIMEOUT_MS = 1_200
+        const val LOSS_WINDOW_SIZE = 25
+        private const val MAX_SANE_LINK_KBPS = 10_000_000 // 10 Gbps upper sanity bound
+
+        /**
+         * Computes rolling probe loss percentage over `windowSize` (default 25):
+         *   - 0 failures -> 0.0%
+         *   - 1 isolated blip -> 1/25 = 4.0% (below the 5.0% critical-loss hard veto even on
+         *     early startup samples, preventing false RED/YELLOW flashes on healthy links)
+         *   - 2+ failures -> exact `failed / size` (e.g. 2/25 = 8.0%, 2/2 = 100%) so genuine
+         *     network loss trips the critical-loss guardrail immediately.
+         */
+        internal fun computeWindowLossPct(
+            outcomes: Collection<Boolean>,
+            windowSize: Int = LOSS_WINDOW_SIZE,
+        ): Double {
+            if (outcomes.isEmpty()) return 0.0
+            val failed = outcomes.count { !it }
+            if (failed == 0) return 0.0
+            val denom = if (failed == 1 && outcomes.size < windowSize) {
+                windowSize
+            } else {
+                outcomes.size
+            }
+            return (failed * 100.0) / denom
+        }
     }
 }

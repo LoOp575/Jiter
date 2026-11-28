@@ -307,7 +307,7 @@ class TrafficAutoProfileDetector(
 
     private fun isWebOrControlPacket(protocol: Int, dstPort: Int, byteLength: Int): Boolean {
         if (protocol == PROTO_ICMP) return true
-        if (dstPort == 53 || dstPort == 853) return true
+        if (dstPort in NON_GAME_CONTROL_PORTS) return true
         if (protocol == PROTO_TCP && byteLength <= 96) return true
         if ((protocol == PROTO_UDP || protocol == PROTO_TCP) && (dstPort == 80 || dstPort == 443)) {
             return true
@@ -340,6 +340,21 @@ class TrafficAutoProfileDetector(
         private const val PROTO_ICMP = 1
         private const val PROTO_TCP = 6
         private const val PROTO_UDP = 17
+
+        // Non-game system/discovery/VoIP/STUN ports that must never falsely lock heuristic GAME mode
+        private val NON_GAME_CONTROL_PORTS = setOf(
+            53,    // DNS
+            123,   // NTP clock sync
+            500,   // IKEv2 / IPsec / VoWiFi
+            853,   // DoT / DoQ
+            1900,  // SSDP / UPnP discovery
+            3478,  // STUN / TURN (WhatsApp/WebRTC)
+            3479,  // STUN / TURN alt
+            4500,  // IPsec NAT-T / VoWiFi
+            5349,  // STUNS / TURNS
+            5353,  // mDNS / Bonjour / Cast
+            19302, // Google WebRTC STUN
+        )
 
         private const val HEURISTIC_GAME_MIN_PKTS = 15
         private const val HEURISTIC_STREAM_MIN_PKTS = 16

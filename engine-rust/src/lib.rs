@@ -256,4 +256,71 @@ mod tests {
             jiter_engine_destroy(h);
         }
     }
+
+    #[test]
+    fn c_ffi_local_tcp_lifecycle_and_null_guards_work_safely() {
+        use crate::ffi::{
+            jiter_local_tcp_can_send_to_app, jiter_local_tcp_close_flow, jiter_local_tcp_create,
+            jiter_local_tcp_destroy, jiter_local_tcp_ingest_ipv4, jiter_local_tcp_poll,
+            jiter_local_tcp_pop_tx_packet, jiter_local_tcp_recv_from_app,
+            jiter_local_tcp_send_to_app, jiter_local_tcp_stats,
+        };
+
+        unsafe {
+            assert_eq!(
+                jiter_local_tcp_ingest_ipv4(
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    0,
+                    0,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ),
+                -1
+            );
+            assert_eq!(jiter_local_tcp_can_send_to_app(std::ptr::null(), 1), -1);
+
+            let h = jiter_local_tcp_create(1500, 42);
+            assert!(!h.is_null());
+
+            // Malformed truncated packet must be ignored safely without panicking
+            let garbage = [0x45u8, 0x00, 0x00, 0x14, 0x00, 0x00];
+            let mut fid = 0u64;
+            let mut dst_ip = 0u32;
+            let mut dst_port = 0u16;
+            assert_eq!(
+                jiter_local_tcp_ingest_ipv4(
+                    h,
+                    garbage.as_ptr(),
+                    garbage.len(),
+                    0,
+                    100,
+                    &mut fid,
+                    &mut dst_ip,
+                    &mut dst_port,
+                ),
+                0
+            );
+            jiter_local_tcp_poll(h, 200);
+            let mut tx_buf = [0u8; 1500];
+            assert_eq!(jiter_local_tcp_pop_tx_packet(h, tx_buf.as_mut_ptr(), tx_buf.len()), 0);
+            assert_eq!(jiter_local_tcp_recv_from_app(h, 999, tx_buf.as_mut_ptr(), 64, 200), -2);
+            assert_eq!(jiter_local_tcp_send_to_app(h, 999, garbage.as_ptr(), garbage.len(), 200), -1);
+            jiter_local_tcp_close_flow(h, 999, 1);
+
+            let mut active = 99u32;
+            let mut total = 99u64;
+            let mut rx = 99u64;
+            let mut tx = 99u64;
+            jiter_local_tcp_stats(h, &mut active, &mut total, &mut rx, &mut tx);
+            assert_eq!(active, 0);
+            assert_eq!(total, 0);
+            assert_eq!(rx, 0);
+            assert_eq!(tx, 0);
+
+            jiter_local_tcp_destroy(h);
+        }
+    }
 }
