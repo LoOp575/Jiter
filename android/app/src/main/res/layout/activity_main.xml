@@ -1,135 +1,344 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/jiter_bg"
-    android:orientation="vertical"
+    android:fitsSystemWindows="true"
     android:paddingStart="24dp"
-    android:paddingTop="24dp"
+    android:paddingTop="18dp"
     android:paddingEnd="24dp"
-    android:paddingBottom="28dp">
+    android:paddingBottom="24dp">
 
-    <!-- Minimal Top Bar: Brand (5-tap hidden developer console) + ID/EN switch -->
+    <!-- Top Bar: Custom Brand Logo + Tracked Italic JITER (5-tap Developer Console) + ID/EN Pill -->
     <LinearLayout
-        android:layout_width="match_parent"
+        android:id="@+id/topBar"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
 
-        <TextView
-            android:id="@+id/tvBrandTitle"
-            android:layout_width="0dp"
+        <LinearLayout
+            android:id="@+id/llBrandHeader"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_weight="1"
             android:clickable="true"
             android:focusable="true"
-            android:letterSpacing="0.18"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
             android:paddingTop="4dp"
-            android:paddingBottom="4dp"
-            android:text="@string/app_name"
-            android:textColor="@color/jiter_text_primary"
-            android:textSize="24sp"
-            android:textStyle="bold" />
+            android:paddingEnd="12dp"
+            android:paddingBottom="4dp">
+
+            <ImageView
+                android:id="@+id/ivBrandLogo"
+                android:layout_width="32dp"
+                android:layout_height="32dp"
+                android:contentDescription="@string/app_name"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_jiter_brand" />
+
+            <TextView
+                android:id="@+id/tvBrandTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:letterSpacing="0.18"
+                android:text="@string/app_name"
+                android:textColor="@color/jiter_text_primary"
+                android:textSize="20sp"
+                android:textStyle="bold|italic" />
+        </LinearLayout>
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnToggleLanguage"
+            android:id="@+id/btnLanguageSwitch"
             style="@style/Widget.Material3.Button.OutlinedButton"
             android:layout_width="wrap_content"
             android:layout_height="38dp"
             android:insetTop="0dp"
             android:insetBottom="0dp"
-            android:minWidth="52dp"
+            android:minWidth="48dp"
+            android:minHeight="0dp"
             android:paddingStart="12dp"
             android:paddingEnd="12dp"
             android:text="@string/lang_switch_id"
-            android:textColor="@color/jiter_accent"
+            android:textColor="@color/jiter_text_primary"
             android:textSize="12sp"
             android:textStyle="bold"
-            app:cornerRadius="12dp"
-            app:strokeColor="@color/jiter_stroke" />
+            app:backgroundTint="@color/jiter_surface"
+            app:cornerRadius="10dp"
+            app:strokeColor="@color/jiter_stroke"
+            app:strokeWidth="1dp" />
     </LinearLayout>
 
-    <!-- Center Hero: Signature Vertical Line | + Single Big GO/STOP Button + Human Status -->
+    <!-- Center Circular Latency Gauge Ring (Tappable to Toggle GO/STOP) -->
+    <FrameLayout
+        android:id="@+id/flRingContainer"
+        android:layout_width="234dp"
+        android:layout_height="234dp"
+        android:clickable="true"
+        android:focusable="true"
+        app:layout_constraintBottom_toTopOf="@+id/llStatusRow"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/topBar"
+        app:layout_constraintVertical_bias="0.52"
+        app:layout_constraintVertical_chainStyle="packed">
+
+        <com.jiter.app.ui.LatencyRingView
+            android:id="@+id/latencyRingView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:baselineAligned="true"
+                android:gravity="bottom"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvLatencyValue"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="sans-serif-medium"
+                    android:includeFontPadding="false"
+                    android:text="--"
+                    android:textColor="@color/jiter_text_primary"
+                    android:textSize="58sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/tvLatencyUnit"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="4dp"
+                    android:layout_marginBottom="6dp"
+                    android:text="@string/unit_ms"
+                    android:textColor="@color/jiter_text_secondary"
+                    android:textSize="18sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tvLatencyLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:letterSpacing="0.22"
+                android:text="@string/ring_label_tap_go"
+                android:textAllCaps="true"
+                android:textColor="@color/jiter_text_muted"
+                android:textSize="11sp" />
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Inline Status Row: Colored Dot + Status + Protection Mode -->
     <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="0dp"
-        android:layout_weight="1"
-        android:gravity="center"
-        android:orientation="vertical">
+        android:id="@+id/llStatusRow"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        app:layout_constraintBottom_toTopOf="@+id/llSparklineSection"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/flRingContainer">
 
-        <!-- Signature single vertical line indicator | -->
         <View
-            android:id="@+id/statusLineIndicator"
-            android:layout_width="10dp"
-            android:layout_height="76dp"
-            android:background="@drawable/bg_status_line" />
+            android:id="@+id/viewStatusDot"
+            android:layout_width="8dp"
+            android:layout_height="8dp"
+            android:background="@drawable/bg_status_dot" />
 
-        <!-- Primary One-Tap GO / STOP Button -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btnGoStop"
-            android:layout_width="172dp"
-            android:layout_height="172dp"
-            android:layout_marginTop="32dp"
-            android:backgroundTint="@color/jiter_green"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:letterSpacing="0.16"
-            android:text="@string/action_go"
-            android:textColor="@color/jiter_bg"
-            android:textSize="32sp"
-            android:textStyle="bold"
-            android:elevation="6dp"
-            app:cornerRadius="86dp" />
-
-        <!-- Human-friendly single status line -->
         <TextView
             android:id="@+id/tvMainStatus"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="32dp"
-            android:gravity="center"
+            android:layout_marginStart="8dp"
             android:text="@string/main_status_ready"
             android:textColor="@color/jiter_text_primary"
-            android:textSize="20sp"
+            android:textSize="14sp"
             android:textStyle="bold" />
 
-        <!-- Subtle Auto-Detected Mode Pill (visible while active) -->
-        <TextView
-            android:id="@+id/tvActivityBadge"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/bg_activity_badge"
-            android:paddingStart="16dp"
-            android:paddingTop="6dp"
-            android:paddingEnd="16dp"
-            android:paddingBottom="6dp"
-            android:textColor="@color/jiter_accent"
-            android:textSize="13sp"
-            android:textStyle="bold"
-            android:visibility="gone" />
-
-        <!-- Calm Secondary Line -->
         <TextView
             android:id="@+id/tvMainSubtitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:gravity="center"
-            android:maxWidth="300dp"
-            android:text="@string/main_subtitle_idle"
+            android:layout_marginStart="10dp"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="@string/main_subtitle_short_idle"
             android:textColor="@color/jiter_text_secondary"
             android:textSize="14sp" />
     </LinearLayout>
 
-    <!-- Minimal Footer -->
-    <TextView
-        android:layout_width="match_parent"
+    <!-- Live 60-Second Latency Sparkline -->
+    <LinearLayout
+        android:id="@+id/llSparklineSection"
+        android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:gravity="center"
-        android:text="@string/main_footer_hint"
-        android:textColor="@color/jiter_text_secondary"
-        android:textSize="12sp" />
+        android:layout_marginTop="28dp"
+        android:orientation="vertical"
+        app:layout_constraintBottom_toTopOf="@+id/llBottomPanel"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@+id/llStatusRow">
 
-</LinearLayout>
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/tvSparklineHeader"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:letterSpacing="0.14"
+                android:text="@string/sparkline_header_60s"
+                android:textAllCaps="true"
+                android:textColor="@color/jiter_text_muted"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/tvSparklineTrend"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/sparkline_trend_idle"
+                android:textColor="@color/jiter_text_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <com.jiter.app.ui.LatencySparklineView
+            android:id="@+id/latencySparklineView"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="10dp" />
+    </LinearLayout>
+
+    <!-- Bottom Controls: 4-Segment Mode Pill Bar + Caption + Primary GO/STOP Button -->
+    <LinearLayout
+        android:id="@+id/llBottomPanel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <LinearLayout
+            android:id="@+id/llModeBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@drawable/bg_mode_bar"
+            android:orientation="horizontal"
+            android:padding="4dp">
+
+            <TextView
+                android:id="@+id/tvModeAuto"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_mode_tab_selected"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="@string/profile_auto"
+                android:textColor="@color/jiter_cyan_dark"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvModeGame"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="@string/profile_game"
+                android:textColor="@color/jiter_text_secondary"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/tvModeStream"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="@string/mode_tab_stream"
+                android:textColor="@color/jiter_text_secondary"
+                android:textSize="13sp" />
+
+            <TextView
+                android:id="@+id/tvModeDownload"
+                android:layout_width="0dp"
+                android:layout_height="40dp"
+                android:layout_weight="1"
+                android:clickable="true"
+                android:focusable="true"
+                android:gravity="center"
+                android:maxLines="1"
+                android:text="@string/profile_download"
+                android:textColor="@color/jiter_text_secondary"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/tvModeCaption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:gravity="center"
+            android:text="@string/mode_caption_auto"
+            android:textColor="@color/jiter_text_muted"
+            android:textSize="12sp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnPrimaryAction"
+            android:layout_width="match_parent"
+            android:layout_height="54dp"
+            android:layout_marginTop="16dp"
+            android:elevation="0dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:letterSpacing="0.16"
+            android:text="@string/action_go"
+            android:textAllCaps="true"
+            android:textColor="@color/jiter_cyan_dark"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            app:backgroundTint="@color/jiter_cyan"
+            app:cornerRadius="14dp"
+            app:icon="@drawable/ic_action_play"
+            app:iconGravity="textStart"
+            app:iconPadding="10dp"
+            app:iconSize="13dp"
+            app:iconTint="@color/jiter_cyan_dark"
+            app:strokeColor="@color/jiter_cyan"
+            app:strokeWidth="1dp" />
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

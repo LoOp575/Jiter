@@ -1,16 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="jiter_bg">#0B0F14</color>
-    <color name="jiter_surface">#141B24</color>
-    <color name="jiter_surface_alt">#1C2531</color>
-    <color name="jiter_stroke">#263242</color>
+    <color name="ic_launcher_bg">#000000</color>
+
+    <color name="jiter_bg">#070B12</color>
+    <color name="jiter_surface">#0E1522</color>
+    <color name="jiter_surface_alt">#141E2E</color>
+    <color name="jiter_stroke">#1E293B</color>
 
     <color name="jiter_text_primary">#F3F7FC</color>
     <color name="jiter_text_secondary">#94A3B8</color>
+    <color name="jiter_text_muted">#64748B</color>
 
-    <color name="jiter_green">#22C55E</color>
+    <color name="jiter_cyan">#22D3EE</color>
+    <color name="jiter_cyan_dark">#041319</color>
+    <color name="jiter_ring_track">#182232</color>
+
+    <color name="jiter_green">#10B981</color>
     <color name="jiter_yellow">#F59E0B</color>
     <color name="jiter_red">#EF4444</color>
     <color name="jiter_unknown">#64748B</color>
-    <color name="jiter_accent">#38BDF8</color>
+    <color name="jiter_accent">#22D3EE</color>
+
+    <color name="jiter_stop_bg">#160B0F</color>
+    <color name="jiter_stop_stroke">#5E242B</color>
+    <color name="jiter_stop_text">#F87171</color>
 </resources>

@@ -14,12 +14,41 @@
     <string name="cfg_language_label">Bahasa Aplikasi</string>
 
     <!-- Layar Utama Super Simpel (One-Tap GO Zero-Config) -->
-    <string name="main_status_ready">Siaga</string>
+    <string name="main_status_ready">Siap</string>
+    <string name="main_status_stable">Stabil</string>
+    <string name="main_status_moderate">Menstabilkan</string>
     <string name="main_status_connecting">Menghubungkan…</string>
     <string name="main_status_active_ping_fmt">Aktif · %1$d ms</string>
     <string name="main_status_active">Aktif</string>
-    <string name="main_status_degraded">Jaringan Tidak Stabil</string>
-    <string name="main_status_error">Gagal Terhubung</string>
+    <string name="main_status_degraded">Tidak Stabil</string>
+    <string name="main_status_error">Gangguan</string>
+
+    <string name="unit_ms">ms</string>
+    <string name="ring_label_latency">LATENSI</string>
+    <string name="ring_label_tap_go">TEKAN GO</string>
+    <string name="ring_label_connecting">MENGHUBUNGKAN</string>
+
+    <string name="sparkline_header_60s">60 DETIK TERAKHIR</string>
+    <string name="sparkline_trend_idle">Siaga</string>
+    <string name="sparkline_trend_steady">Stabil</string>
+    <string name="sparkline_trend_variable">Fluktuatif</string>
+    <string name="sparkline_trend_spike">Lonjakan</string>
+
+    <string name="mode_tab_stream">Stream</string>
+    <string name="mode_caption_auto">Otomatis adaptasi untuk game, streaming &amp; download</string>
+    <string name="mode_caption_auto_detected_fmt">Otomatis · %1$s aktif</string>
+    <string name="mode_caption_game">Memprioritaskan ping &amp; jitter terendah</string>
+    <string name="mode_caption_stream">Menjaga kelancaran streaming tanpa macet</string>
+    <string name="mode_caption_download">Prioritas kecepatan unduh maksimal</string>
+
+    <string name="main_subtitle_short_idle">Tekan GO untuk proteksi</string>
+    <string name="main_subtitle_short_connecting">Memilih rute terbaik</string>
+    <string name="main_subtitle_short_encrypted_fmt">Terenkripsi (%1$s)</string>
+    <string name="main_subtitle_short_shaper">Pengatur trafik adaptif</string>
+    <string name="main_subtitle_short_local">Proteksi adaptif</string>
+    <string name="main_subtitle_short_moderate">Meredam jitter &amp; bloat</string>
+    <string name="main_subtitle_short_degraded">Mengamankan trafik prioritas</string>
+    <string name="main_subtitle_short_offline">Tidak ada koneksi internet</string>
 
     <string name="main_subtitle_idle">Tekan GO — JITER otomatis optimalkan game &amp; streaming</string>
     <string name="main_subtitle_connecting">Menyiapkan rute terbaik secara otomatis…</string>

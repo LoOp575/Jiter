@@ -86,6 +86,8 @@ class JiterVpnService : VpnService() {
 
     private val relayReconnectNeeded = AtomicBoolean(false)
     private val localTunTxCount = AtomicLong(0L)
+    private val rttHistoryLock = Any()
+    private val rttHistoryWindow = ArrayDeque<Double>(64)
 
     @Volatile
     private var isRunning: Boolean = false
@@ -246,6 +248,7 @@ class JiterVpnService : VpnService() {
         controlPlaneActive = false
         activeTunnelIp = DEFAULT_TUN_IPV4
         localTunTxCount.set(0L)
+        synchronized(rttHistoryLock) { rttHistoryWindow.clear() }
         trafficAutoProfileDetector.reset()
         currentFecMode = FecMode.OFF
         currentBgPacerRatio = 1.0
@@ -714,6 +717,17 @@ class JiterVpnService : VpnService() {
             }
             val totalRx = if (localShaperActive) localStats.rxPackets else relayStats.rxPackets
 
+            val latestRttForChart = sample.rttMs ?: engineOut.srttMs
+            val historySnapshot = synchronized(rttHistoryLock) {
+                if (latestRttForChart != null && latestRttForChart.isFinite() && latestRttForChart > 0.0) {
+                    if (rttHistoryWindow.size >= 60) {
+                        rttHistoryWindow.removeFirst()
+                    }
+                    rttHistoryWindow.addLast(latestRttForChart)
+                }
+                rttHistoryWindow.toList()
+            }
+
             val detail = buildString {
                 if (sample.networkType == "Offline") {
                     append("No active internet (${cfg.failurePolicy.label})")
@@ -772,6 +786,7 @@ class JiterVpnService : VpnService() {
                 tunTxPackets = totalTx,
                 tunRxPackets = totalRx,
                 fecRecoveredPackets = relayStats.fecRecoveredTotal,
+                rttHistoryMs = historySnapshot,
                 lastSampleTimestampMs = SystemClock.elapsedRealtime(),
                 statusDetail = detail,
                 reasonCodes = baseDecision.reasonCodes,
@@ -832,6 +847,7 @@ class JiterVpnService : VpnService() {
         tunPumpJob = null
         networkMonitor.stopObservingNetwork()
         trafficAutoProfileDetector.reset()
+        synchronized(rttHistoryLock) { rttHistoryWindow.clear() }
 
         localShaper.stop()
 

@@ -122,6 +122,7 @@ data class SessionSnapshot(
     val tunTxPackets: Long = 0L,
     val tunRxPackets: Long = 0L,
     val fecRecoveredPackets: Long = 0L,
+    val rttHistoryMs: List<Double> = emptyList(),
     val lastSampleTimestampMs: Long? = null,
     val statusDetail: String = "Idle — tap GO to start JITER session",
     val reasonCodes: List<String> = emptyList(),

@@ -15,11 +15,40 @@
 
     <!-- Ultra-Minimalist Main Screen (Zero-Config One-Tap GO) -->
     <string name="main_status_ready">Ready</string>
+    <string name="main_status_stable">Stable</string>
+    <string name="main_status_moderate">Stabilizing</string>
     <string name="main_status_connecting">Connecting…</string>
     <string name="main_status_active_ping_fmt">Active · %1$d ms</string>
     <string name="main_status_active">Active</string>
-    <string name="main_status_degraded">Network Unstable</string>
-    <string name="main_status_error">Connection Error</string>
+    <string name="main_status_degraded">Unstable</string>
+    <string name="main_status_error">Error</string>
+
+    <string name="unit_ms">ms</string>
+    <string name="ring_label_latency">LATENCY</string>
+    <string name="ring_label_tap_go">TAP GO</string>
+    <string name="ring_label_connecting">CONNECTING</string>
+
+    <string name="sparkline_header_60s">LAST 60 S</string>
+    <string name="sparkline_trend_idle">Standby</string>
+    <string name="sparkline_trend_steady">Steady</string>
+    <string name="sparkline_trend_variable">Variable</string>
+    <string name="sparkline_trend_spike">Spike</string>
+
+    <string name="mode_tab_stream">Stream</string>
+    <string name="mode_caption_auto">Adapts to game, streaming &amp; download</string>
+    <string name="mode_caption_auto_detected_fmt">Auto · %1$s active</string>
+    <string name="mode_caption_game">Prioritizing lowest ping &amp; jitter</string>
+    <string name="mode_caption_stream">Balancing smooth playback &amp; low stutter</string>
+    <string name="mode_caption_download">Full-speed throughput priority</string>
+
+    <string name="main_subtitle_short_idle">Tap GO to protect</string>
+    <string name="main_subtitle_short_connecting">Selecting optimal route</string>
+    <string name="main_subtitle_short_encrypted_fmt">Encrypted (%1$s)</string>
+    <string name="main_subtitle_short_shaper">Adaptive local shaper</string>
+    <string name="main_subtitle_short_local">Adaptive protection</string>
+    <string name="main_subtitle_short_moderate">Reducing jitter &amp; bloat</string>
+    <string name="main_subtitle_short_degraded">Protecting priority traffic</string>
+    <string name="main_subtitle_short_offline">No internet connection</string>
 
     <string name="main_subtitle_idle">Tap GO — JITER automatically optimizes games &amp; streaming</string>
     <string name="main_subtitle_connecting">Preparing optimal route automatically…</string>
