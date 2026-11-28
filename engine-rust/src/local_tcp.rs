@@ -19,11 +19,11 @@ use smoltcp::time::{Duration, Instant};
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 
 pub const MAX_LOCAL_TCP_FLOWS: usize = 256;
-const TCP_RX_BUF_BYTES: usize = 32 * 1024;
-const TCP_TX_BUF_BYTES: usize = 64 * 1024;
+const TCP_RX_BUF_BYTES: usize = 128 * 1024;
+const TCP_TX_BUF_BYTES: usize = 256 * 1024;
 const FLOW_IDLE_TIMEOUT_MS: i64 = 120_000;
 const CLOSED_RETENTION_MS: i64 = 15_000;
-const MAX_TX_QUEUE_PKTS: usize = 1024;
+const MAX_TX_QUEUE_PKTS: usize = 2048;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct TcpFlowKey {
@@ -72,8 +72,8 @@ impl VirtualTunDevice {
     fn new(mtu: usize) -> Self {
         Self {
             mtu: mtu.clamp(576, 1500),
-            rx_queue: VecDeque::with_capacity(64),
-            tx_queue: VecDeque::with_capacity(128),
+            rx_queue: VecDeque::with_capacity(128),
+            tx_queue: VecDeque::with_capacity(256),
         }
     }
 }
@@ -236,7 +236,7 @@ impl LocalTcpStack {
             tcp::SocketBuffer::new(vec![0u8; TCP_TX_BUF_BYTES]),
         );
         socket.set_nagle_enabled(false);
-        socket.set_ack_delay(None);
+        socket.set_ack_delay(Some(Duration::from_millis(4)));
         socket.set_timeout(Some(Duration::from_secs(45)));
         socket.set_keep_alive(Some(Duration::from_secs(25)));
 

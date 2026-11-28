@@ -21,20 +21,25 @@ data class LocalShaperStats(
     val txPackets: Long = 0L,
     val rxPackets: Long = 0L,
     val pacedBackgroundBytes: Long = 0L,
+    val txBytes: Long = 0L,
+    val rxBytes: Long = 0L,
 ) {
     val activeFlows: Int get() = activeUdpFlows + activeTcpFlows
 }
 
 /**
- * Stage 6 Local Traffic Shaper (No-VPS Hybrid Mode).
+ * Stage 6.2 High-Throughput Local Traffic Shaper (No-VPS Hybrid Mode).
  *
  * Runs a single lightweight NIO `Selector` I/O loop owning:
  *   1. Non-blocking UDP Local NAT (`DatagramChannel`, max 256 flows) with DNS port-53 Tier-0 Fast-Path.
- *   2. Transparent user-space TCP proxy backed by Rust `smoltcp` (`LocalTcpBackend`, max 256 flows).
+ *   2. Transparent user-space TCP proxy backed by Rust `smoltcp` (`LocalTcpBackend`, max 256 flows,
+ *      256 KB TX / 128 KB RX windows, 64 KB NIO multi-read draining, zero-wait active bursts, and
+ *      coalesced `selector.wakeup()`).
  *   3. Rolling 50 ms Token-Bucket Background Pacer on Tier-2 TCP flows driven live by the
  *      Rust Adaptive Controller's `bgPacerRatio` — smoothly pausing `OP_READ` on background
- *      download sockets when bufferbloat rises so `rwnd` slows remote CDNs cleanly without
- *      dropping packets or breaking HTTPS / Play Store / m-banking sessions.
+ *      download sockets when active Game/Streaming experiences bufferbloat so `rwnd` slows
+ *      remote CDNs cleanly without dropping packets or breaking HTTPS / Play Store / m-banking.
+ *      When `bgPacerRatio >= 0.99` (Download / Browser / Social / Standby), pacing is 100% bypassed.
  *
  * Every outbound socket is protected via `VpnService.protect()` before connecting so traffic
  * never loops back into Android's TUN interface.
@@ -47,6 +52,7 @@ class LocalTrafficShaper(
         LocalTcpNativeBridge.openStack(mtu, seed)
     },
     private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
+    private val onDownlinkActivity: ((tier: Int, bytes: Int, isUdp: Boolean) -> Unit)? = null,
 ) {
     private data class QueuedOutbound(
         val rawIpv4: ByteArray,
@@ -82,9 +88,12 @@ class LocalTrafficShaper(
 
     private val outboundQueue = ConcurrentLinkedQueue<QueuedOutbound>()
     private val running = AtomicBoolean(false)
+    private val selectorSleeping = AtomicBoolean(false)
 
     private val txPacketsCounter = AtomicLong(0L)
     private val rxPacketsCounter = AtomicLong(0L)
+    private val txBytesCounter = AtomicLong(0L)
+    private val rxBytesCounter = AtomicLong(0L)
     private val pacedBgBytesCounter = AtomicLong(0L)
     private val activeUdpCounter = AtomicInteger(0)
     private val activeTcpCounter = AtomicInteger(0)
@@ -103,7 +112,7 @@ class LocalTrafficShaper(
 
     private var ipIdCounter = 1
 
-    fun start(mtu: Int = 1280): Boolean {
+    fun start(mtu: Int = 1500): Boolean {
         if (running.getAndSet(true)) return true
         val sel = try {
             Selector.open()
@@ -112,6 +121,7 @@ class LocalTrafficShaper(
             return false
         }
         selector = sel
+        selectorSleeping.set(false)
         val tcpBackend = tcpBackendFactory(mtu, System.nanoTime())
 
         val thread = Thread({
@@ -126,6 +136,7 @@ class LocalTrafficShaper(
 
     fun stop() {
         if (!running.getAndSet(false)) return
+        selectorSleeping.set(false)
         try {
             selector?.wakeup()
         } catch (_: Exception) {
@@ -146,7 +157,7 @@ class LocalTrafficShaper(
     fun updatePacer(ratio: Double, linkMbps: Double?) {
         bgPacerRatio = ratio.coerceIn(0.15, 1.0)
         if (linkMbps != null && linkMbps.isFinite() && linkMbps > 0.5) {
-            estimatedLinkMbps = linkMbps.coerceIn(1.0, 200.0)
+            estimatedLinkMbps = linkMbps.coerceIn(1.0, 500.0)
         }
     }
 
@@ -165,10 +176,12 @@ class LocalTrafficShaper(
         }
 
         outboundQueue.offer(QueuedOutbound(rawIpv4.copyOf(length), effectiveTier))
-        try {
-            selector?.wakeup()
-        } catch (_: Exception) {
-            // Ignore wakeup race
+        if (selectorSleeping.compareAndSet(true, false)) {
+            try {
+                selector?.wakeup()
+            } catch (_: Exception) {
+                // Ignore wakeup race
+            }
         }
     }
 
@@ -178,6 +191,8 @@ class LocalTrafficShaper(
         txPackets = txPacketsCounter.get(),
         rxPackets = rxPacketsCounter.get(),
         pacedBackgroundBytes = pacedBgBytesCounter.get(),
+        txBytes = txBytesCounter.get(),
+        rxBytes = rxBytesCounter.get(),
     )
 
     private fun runIoLoop(sel: Selector, tcpBackend: LocalTcpBackend?) {
@@ -185,8 +200,8 @@ class LocalTrafficShaper(
         val tcpFlows = HashMap<Long, TcpFlow>(64)
 
         val udpRxBuf = ByteBuffer.allocate(2048)
-        val tcpTmpBuf = ByteArray(16 * 1024)
-        val tcpDownBuf = ByteBuffer.allocate(16 * 1024)
+        val tcpTmpBuf = ByteArray(64 * 1024)
+        val tcpDownBuf = ByteBuffer.allocate(64 * 1024)
         val tunTxBuf = ByteArray(2048)
         val metaOut = LongArray(3)
 
@@ -197,6 +212,7 @@ class LocalTrafficShaper(
         try {
             while (running.get()) {
                 val nowMs = clockMs()
+                var didWork = false
 
                 // Reset 50 ms rolling Token-Bucket for Tier-2 Background TCP pacing
                 if (nowMs - lastPacerWindowMs >= PACER_WINDOW_MS) {
@@ -207,9 +223,10 @@ class LocalTrafficShaper(
 
                 // 1. Drain newly scheduled outbound IPv4 packets from TUN pump
                 var drained = 0
-                while (drained < 128) {
+                while (drained < MAX_OUTBOUND_DRAIN_PER_TICK) {
                     val pkt = outboundQueue.poll() ?: break
                     drained += 1
+                    didWork = true
                     val proto = Ipv4PacketCodec.getProtocol(pkt.rawIpv4, pkt.rawIpv4.size)
                     when (proto) {
                         Ipv4PacketCodec.PROTO_UDP -> handleOutboundUdp(
@@ -236,13 +253,18 @@ class LocalTrafficShaper(
                 // 2. Drive smoltcp timers & flush downlink TCP IPv4 packets back to TUN
                 if (tcpBackend != null) {
                     tcpBackend.poll(nowMs)
-                    drainTcpDownlinkToTun(tcpBackend, tunTxBuf)
-                    pumpAppBytesToRemoteTcp(
-                        tcpBackend = tcpBackend,
-                        tcpFlows = tcpFlows,
-                        tmpBuf = tcpTmpBuf,
-                        nowMs = nowMs,
-                    )
+                    if (drainTcpDownlinkToTun(tcpBackend, tunTxBuf) > 0) {
+                        didWork = true
+                    }
+                    if (pumpAppBytesToRemoteTcp(
+                            tcpBackend = tcpBackend,
+                            tcpFlows = tcpFlows,
+                            tmpBuf = tcpTmpBuf,
+                            nowMs = nowMs,
+                        )
+                    ) {
+                        didWork = true
+                    }
                     updateTcpInterestOps(
                         tcpBackend = tcpBackend,
                         tcpFlows = tcpFlows,
@@ -251,8 +273,20 @@ class LocalTrafficShaper(
                     )
                 }
 
-                // 3. Non-blocking select (5 ms tick keeps smoltcp timers & 50 ms pacer crisp)
-                sel.select(5L)
+                // 3. Zero-wait poll during active traffic bursts; 5 ms sleep only when idle
+                if (didWork || !outboundQueue.isEmpty()) {
+                    sel.selectNow()
+                } else {
+                    selectorSleeping.set(true)
+                    if (!outboundQueue.isEmpty()) {
+                        selectorSleeping.set(false)
+                        sel.selectNow()
+                    } else {
+                        sel.select(5L)
+                        selectorSleeping.set(false)
+                    }
+                }
+
                 val postSelectNow = clockMs()
                 if (postSelectNow - lastPacerWindowMs >= PACER_WINDOW_MS) {
                     lastPacerWindowMs = postSelectNow
@@ -303,6 +337,7 @@ class LocalTrafficShaper(
         } catch (_: Exception) {
             // Safe teardown on stop
         } finally {
+            selectorSleeping.set(false)
             for (u in udpFlows.values) {
                 closeQuietly(u.channel)
             }
@@ -391,6 +426,7 @@ class LocalTrafficShaper(
             val sent = flow.channel.write(payloadBuf)
             if (sent >= 0) {
                 txPacketsCounter.incrementAndGet()
+                txBytesCounter.addAndGet(sent.toLong())
             }
         } catch (_: Exception) {
             udpFlows.remove(key)
@@ -402,7 +438,7 @@ class LocalTrafficShaper(
     private fun handleReadableUdp(flow: UdpFlow, rxBuf: ByteBuffer, nowMs: Long) {
         try {
             var count = 0
-            while (count < 16) {
+            while (count < 32) {
                 rxBuf.clear()
                 val n = flow.channel.read(rxBuf)
                 if (n <= 0) break
@@ -419,6 +455,8 @@ class LocalTrafficShaper(
                     identification = nextIpId(),
                 )
                 rxPacketsCounter.incrementAndGet()
+                rxBytesCounter.addAndGet(n.toLong())
+                onDownlinkActivity?.invoke(flow.tier, n, true)
                 onDownlinkPacket(downlink, downlink.size)
             }
         } catch (_: Exception) {
@@ -436,6 +474,7 @@ class LocalTrafficShaper(
         tcpFlows: HashMap<Long, TcpFlow>,
     ) {
         txPacketsCounter.incrementAndGet()
+        txBytesCounter.addAndGet(raw.size.toLong())
         val res = tcpBackend.ingestIpv4(raw, raw.size, tier, nowMs, metaOut)
         if (res != 1) return
 
@@ -451,8 +490,15 @@ class LocalTrafficShaper(
         val ch = try {
             SocketChannel.open().apply {
                 configureBlocking(false)
-                socket().tcpNoDelay = true
-                protectStream(socket())
+                val sock = socket()
+                sock.tcpNoDelay = true
+                try {
+                    sock.receiveBufferSize = REMOTE_TCP_RCVBUF_BYTES
+                    sock.sendBufferSize = REMOTE_TCP_SNDBUF_BYTES
+                } catch (_: Exception) {
+                    // Best-effort OS socket buffer hint
+                }
+                protectStream(sock)
             }
         } catch (_: Exception) {
             tcpBackend.closeFlow(flowId, abort = true)
@@ -491,7 +537,8 @@ class LocalTrafficShaper(
         tcpFlows: HashMap<Long, TcpFlow>,
         tmpBuf: ByteArray,
         nowMs: Long,
-    ) {
+    ): Boolean {
+        var transferredAny = false
         val toDrop = ArrayList<Long>()
         for (flow in tcpFlows.values) {
             if (!flow.connected || flow.appEof) continue
@@ -500,6 +547,7 @@ class LocalTrafficShaper(
             val n = tcpBackend.recvFromApp(flow.flowId, tmpBuf, tmpBuf.size, nowMs)
             when {
                 n > 0 -> {
+                    transferredAny = true
                     flow.lastActiveMs = nowMs
                     val bb = ByteBuffer.wrap(tmpBuf.copyOf(n))
                     try {
@@ -531,6 +579,7 @@ class LocalTrafficShaper(
         for (id in toDrop) {
             removeTcpFlow(tcpFlows, id)
         }
+        return transferredAny
     }
 
     private fun updateTcpInterestOps(
@@ -540,7 +589,7 @@ class LocalTrafficShaper(
         bgWindowBytesUsed: Long,
     ) {
         val sel = selector ?: return
-        val bgBudgetExhausted = bgWindowBytesUsed >= bgBudgetBytes
+        val bgBudgetExhausted = bgBudgetBytes < Long.MAX_VALUE && bgWindowBytesUsed >= bgBudgetBytes
         for (flow in tcpFlows.values) {
             val key = flow.channel.keyFor(sel) ?: continue
             if (!key.isValid) continue
@@ -609,18 +658,20 @@ class LocalTrafficShaper(
         }
 
         if (key.isValid && key.isReadable && flow.connected && !flow.remoteEof) {
-            val freeSpace = tcpBackend.canSendToApp(flow.flowId)
-            if (freeSpace < 0) {
-                removeTcpFlow(tcpFlows, flow.flowId)
-                return usedBg
-            }
-            if (freeSpace > 0) {
+            var reads = 0
+            while (reads < MAX_TCP_READS_PER_KEY && !flow.remoteEof) {
+                val freeSpace = tcpBackend.canSendToApp(flow.flowId)
+                if (freeSpace < 0) {
+                    removeTcpFlow(tcpFlows, flow.flowId)
+                    return usedBg
+                }
+                if (freeSpace == 0) break
+
                 var maxRead = minOf(freeSpace, downBuf.capacity())
-                if (flow.tier == RelayProtocol.TIER_BACKGROUND && bgBudgetBytes < Long.MAX_VALUE) {
+                val pacingActive = flow.tier == RelayProtocol.TIER_BACKGROUND && bgBudgetBytes < Long.MAX_VALUE
+                if (pacingActive) {
                     val remaining = (bgBudgetBytes - usedBg).coerceAtLeast(0L)
-                    if (remaining == 0L) {
-                        return usedBg
-                    }
+                    if (remaining == 0L) break
                     maxRead = minOf(maxRead, remaining.toInt())
                 }
 
@@ -640,17 +691,24 @@ class LocalTrafficShaper(
                     if (flow.appEof) {
                         removeTcpFlow(tcpFlows, flow.flowId)
                     }
-                } else if (readN > 0) {
+                    break
+                } else if (readN == 0) {
+                    break
+                } else {
+                    reads += 1
                     flow.lastActiveMs = nowMs
                     val written = tcpBackend.sendToApp(flow.flowId, downBuf.array(), 0, readN, nowMs)
                     if (written < 0) {
                         removeTcpFlow(tcpFlows, flow.flowId)
                         return usedBg
                     }
-                    if (flow.tier == RelayProtocol.TIER_BACKGROUND && bgBudgetBytes < Long.MAX_VALUE) {
+                    rxBytesCounter.addAndGet(readN.toLong())
+                    onDownlinkActivity?.invoke(flow.tier, readN, false)
+                    if (pacingActive) {
                         usedBg += readN.toLong()
                         pacedBgBytesCounter.addAndGet(readN.toLong())
                     }
+                    if (readN < maxRead) break
                 }
             }
         }
@@ -658,15 +716,16 @@ class LocalTrafficShaper(
         return usedBg
     }
 
-    private fun drainTcpDownlinkToTun(tcpBackend: LocalTcpBackend, tunTxBuf: ByteArray) {
+    private fun drainTcpDownlinkToTun(tcpBackend: LocalTcpBackend, tunTxBuf: ByteArray): Int {
         var count = 0
-        while (count < 128) {
+        while (count < MAX_TUN_DRAIN_PER_TICK) {
             val n = tcpBackend.popTxPacket(tunTxBuf)
             if (n <= 0) break
             count += 1
             rxPacketsCounter.incrementAndGet()
             onDownlinkPacket(tunTxBuf, n)
         }
+        return count
     }
 
     private fun gcUdpFlows(udpFlows: LinkedHashMap<UdpFlowKey, UdpFlow>, nowMs: Long) {
@@ -738,11 +797,16 @@ class LocalTrafficShaper(
     companion object {
         private const val MAX_UDP_FLOWS = 256
         private const val MAX_TCP_FLOWS = 256
-        private const val MAX_OUTBOUND_QUEUE = 1024
+        private const val MAX_OUTBOUND_QUEUE = 2048
+        private const val MAX_OUTBOUND_DRAIN_PER_TICK = 256
+        private const val MAX_TUN_DRAIN_PER_TICK = 512
+        private const val MAX_TCP_READS_PER_KEY = 4
+        private const val REMOTE_TCP_RCVBUF_BYTES = 256 * 1024
+        private const val REMOTE_TCP_SNDBUF_BYTES = 128 * 1024
         private const val UDP_IDLE_TIMEOUT_MS = 60_000L
         private const val TCP_IDLE_TIMEOUT_MS = 120_000L
         private const val PACER_WINDOW_MS = 50L
-        private const val DEFAULT_LINK_MBPS = 20.0
+        private const val DEFAULT_LINK_MBPS = 25.0
         private const val BG_PACER_FLOOR_BYTES_PER_SEC = 50_000.0 // 400 Kbps floor so downloads never timeout
     }
 }

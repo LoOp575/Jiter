@@ -272,6 +272,13 @@ private class NativeRustCppAdapter(
     }
 
     @Synchronized
+    override fun configureSchedulerPacer(bgPacerRatio: Double, estimatedLinkMbps: Double) {
+        if (handle != 0L) {
+            NativeEngineBridge.nativeConfigurePacer(handle, bgPacerRatio, estimatedLinkMbps)
+        }
+    }
+
+    @Synchronized
     override fun close() {
         if (handle != 0L) {
             NativeEngineBridge.nativeDestroySession(handle)
@@ -341,6 +348,13 @@ private class HybridNativePacketKotlinMathAdapter(
     ): Boolean {
         if (handle == 0L) return false
         return NativeEngineBridge.nativeDequeuePacket(handle, nowMs, outBuf, outTierAndLen)
+    }
+
+    @Synchronized
+    override fun configureSchedulerPacer(bgPacerRatio: Double, estimatedLinkMbps: Double) {
+        if (handle != 0L) {
+            NativeEngineBridge.nativeConfigurePacer(handle, bgPacerRatio, estimatedLinkMbps)
+        }
     }
 
     @Synchronized

@@ -8,10 +8,17 @@ import com.jiter.app.config.BackendConfig
 import com.jiter.app.config.LanguageManager
 import com.jiter.app.config.RoutingMode
 import com.jiter.app.config.TunnelScope
+import com.jiter.app.context.AppContextDetector
+import com.jiter.app.context.AutoProfileAssessment
+import com.jiter.app.context.DetectedContext
+import com.jiter.app.context.FlowClassification
+import com.jiter.app.context.FlowTupleCache
+import com.jiter.app.context.FlowTupleKey
 import com.jiter.app.context.TrafficAutoProfileDetector
 import com.jiter.app.context.UidFlowClassifier
 import com.jiter.app.local.Ipv4PacketCodec
 import com.jiter.app.local.LocalTrafficShaper
+import com.jiter.app.vpn.JiterVpnService
 import com.jiter.app.relay.ControlPlaneClient
 import com.jiter.app.relay.EncryptedHelloAckPayload
 import com.jiter.app.relay.EncryptedHelloReqPayload
@@ -1272,5 +1279,233 @@ class JiterEngineTest {
 
         val localOnly = BackendConfig(tunnelScope = TunnelScope.LOCAL_SHAPER_ONLY).sanitized()
         assertTrue(localOnly.summaryLabel().contains("Local Shaper"))
+    }
+
+    // ------------------------------------------------------------------------
+    // Stage 6.2: Auto-Profile Accuracy & High-Throughput Local Shaper Fixes
+    // ------------------------------------------------------------------------
+
+    @Test
+    fun stage62ControlPacketsNeverFalseTriggerGameMode() {
+        val detector = TrafficAutoProfileDetector()
+        var nowMs = 1_000L
+
+        // Simulate heavy browsing/download control plane: TCP ACKs (<=96B), DNS (53), ICMP, small QUIC (443)
+        for (i in 0 until 50) {
+            detector.recordPacket(
+                tier = RelayProtocol.TIER_GAME,
+                byteLength = 52,
+                uidMatched = false,
+                nowMs = nowMs + i * 10L,
+                protocol = 6,
+                dstPort = 443,
+                isControlPacket = true,
+            )
+        }
+        for (i in 0 until 30) {
+            detector.recordPacket(
+                tier = RelayProtocol.TIER_GAME,
+                byteLength = 72,
+                uidMatched = false,
+                nowMs = nowMs + 600L + i * 10L,
+                protocol = 17,
+                dstPort = 53,
+                isControlPacket = true,
+            )
+        }
+        for (i in 0 until 20) {
+            detector.recordPacket(
+                tier = RelayProtocol.TIER_GAME,
+                byteLength = 64,
+                uidMatched = false,
+                nowMs = nowMs + 1_000L + i * 10L,
+                protocol = 1,
+                dstPort = 0,
+                isControlPacket = true,
+            )
+            detector.recordPacket(
+                tier = RelayProtocol.TIER_GAME,
+                byteLength = 180,
+                uidMatched = false,
+                nowMs = nowMs + 1_200L + i * 10L,
+                protocol = 17,
+                dstPort = 443,
+                isControlPacket = false,
+            )
+        }
+
+        val afterWebControl = detector.evaluate(nowMs + 1_500L)
+        assertEquals(TrafficProfile.SAFE_BALANCED, afterWebControl.profile)
+        assertFalse(afterWebControl.detectedFromPackets)
+
+        // Genuine non-web/non-DNS game UDP burst (>= 15 pkts) triggers GAME cleanly
+        nowMs += 4_000L
+        for (i in 0 until 18) {
+            detector.recordPacket(
+                tier = RelayProtocol.TIER_GAME,
+                byteLength = 110,
+                uidMatched = false,
+                nowMs = nowMs + i * 20L,
+                protocol = 17,
+                dstPort = 5001,
+                isControlPacket = false,
+            )
+        }
+        val afterRealGameUdp = detector.evaluate(nowMs + 500L)
+        assertEquals(TrafficProfile.GAME, afterRealGameUdp.profile)
+        assertTrue(afterRealGameUdp.detectedFromPackets)
+        assertFalse(afterRealGameUdp.uidVerified)
+    }
+
+    @Test
+    fun stage62DownlinkBytesMeasureHighSpeedGoodputAndSeparateBrowsingFromDownload() {
+        val detector = TrafficAutoProfileDetector()
+
+        // Normal Chrome browsing with small page loads stays BROWSER (not GAME or DOWNLOAD)
+        detector.recordPacket(
+            tier = RelayProtocol.TIER_STREAMING,
+            byteLength = 512,
+            uidMatched = true,
+            nowMs = 1_000L,
+            protocol = 6,
+            dstPort = 443,
+            uidProfile = TrafficProfile.BROWSER,
+        )
+        detector.recordDownlinkBytes(RelayProtocol.TIER_STREAMING, 120_000, isUdp = false, nowMs = 1_200L)
+        val browsing = detector.evaluate(1_500L)
+        assertEquals(TrafficProfile.BROWSER, browsing.profile)
+
+        // Sustained 5 MB downlink over 1 second -> transitions to DOWNLOAD and reports real ~40 Mbps goodput
+        for (i in 0 until 80) {
+            detector.recordDownlinkBytes(
+                tier = RelayProtocol.TIER_BACKGROUND,
+                byteLength = 65_536,
+                isUdp = false,
+                nowMs = 2_000L + i * 12L,
+            )
+        }
+        val downloading = detector.evaluate(2_960L)
+        assertEquals(TrafficProfile.DOWNLOAD, downloading.profile)
+        val goodput = requireNotNull(downloading.observedGoodputMbps)
+        assertTrue("Expected real downlink goodput >= 20 Mbps, got $goodput", goodput >= 20.0)
+    }
+
+    @Test
+    fun stage62FlowTupleCacheCachesHitsExpiresTtlAndEvictsLru() {
+        val cache = FlowTupleCache<FlowClassification>(maxEntries = 2, ttlMs = 30_000L)
+        val k1 = FlowTupleKey(6, 0x0A4D0002, 50001, 0x01010101, 443)
+        val k2 = FlowTupleKey(6, 0x0A4D0002, 50002, 0x08080808, 443)
+        val k3 = FlowTupleKey(17, 0x0A4D0002, 50003, 0x08080404, 5001)
+
+        val browserFlow = FlowClassification(-1, TrafficProfile.BROWSER)
+        val downloadFlow = FlowClassification(RelayProtocol.TIER_BACKGROUND, TrafficProfile.DOWNLOAD)
+        val gameFlow = FlowClassification(RelayProtocol.TIER_GAME, TrafficProfile.GAME)
+
+        cache.put(k1, browserFlow, nowMs = 1_000L)
+        cache.put(k2, downloadFlow, nowMs = 1_000L)
+        assertEquals(browserFlow, cache.get(k1, nowMs = 15_000L)) // promotes k1 as MRU
+
+        // Adding k3 evicts LRU entry (k2)
+        cache.put(k3, gameFlow, nowMs = 16_000L)
+        assertNull(cache.get(k2, nowMs = 16_500L))
+        assertEquals(browserFlow, cache.get(k1, nowMs = 25_000L))
+
+        // After TTL (30 s) expires, k1 returns null
+        assertNull(cache.get(k1, nowMs = 32_000L))
+    }
+
+    @Test
+    fun stage62AppContextDetectorSkipsSelfSwitchRemembersAppAndClearsOnLauncher() {
+        // Switching from Chrome -> JITER dashboard -> SystemUI preserves Chrome
+        val afterAltTabToJiter = AppContextDetector.resolveForegroundPackageFromEvents(
+            resumedPackages = listOf(
+                "com.android.chrome",
+                "com.jiter.app.debug",
+                "com.android.systemui",
+            ),
+            previousForeground = null,
+            selfPackage = "com.jiter.app.debug",
+            launcherPackage = "com.oppo.launcher",
+        )
+        assertEquals("com.android.chrome", afterAltTabToJiter)
+
+        // Quiet poll (user stays in Chrome > 60 s with no new resume events) retains Chrome
+        val duringQuietReading = AppContextDetector.resolveForegroundPackageFromEvents(
+            resumedPackages = emptyList(),
+            previousForeground = afterAltTabToJiter,
+            selfPackage = "com.jiter.app.debug",
+            launcherPackage = "com.oppo.launcher",
+        )
+        assertEquals("com.android.chrome", duringQuietReading)
+
+        // Returning to Home launcher clears foreground app -> Standby
+        val afterHomePress = AppContextDetector.resolveForegroundPackageFromEvents(
+            resumedPackages = listOf("com.oppo.launcher"),
+            previousForeground = duringQuietReading,
+            selfPackage = "com.jiter.app.debug",
+            launcherPackage = "com.oppo.launcher",
+        )
+        assertNull(afterHomePress)
+    }
+
+    @Test
+    fun stage62ProfilePrecedenceFollowsForegroundAppAndUpgradesBrowserDownload() {
+        val staleGamePkt = AutoProfileAssessment(
+            profile = TrafficProfile.GAME,
+            detectedFromPackets = true,
+            concurrentStreaming = false,
+            observedGoodputMbps = 1.2,
+            uidVerified = true,
+        )
+        val chromeUsage = DetectedContext("com.android.chrome", TrafficProfile.BROWSER, hasUsagePermission = true)
+        val youtubeUsage = DetectedContext("com.google.android.youtube", TrafficProfile.STREAMING, hasUsagePermission = true)
+        val noUsage = DetectedContext(null, TrafficProfile.SAFE_BALANCED, hasUsagePermission = false)
+
+        // 1. Manual override wins over everything
+        val manual = JiterVpnService.resolveEffectiveProfile(TrafficProfile.DOWNLOAD, youtubeUsage, staleGamePkt)
+        assertEquals(TrafficProfile.DOWNLOAD, manual.first)
+        assertEquals("Manual", manual.second)
+
+        // 2. Active foreground Chrome beats minimized background game packets
+        val chromeWins = JiterVpnService.resolveEffectiveProfile(null, chromeUsage, staleGamePkt)
+        assertEquals(TrafficProfile.BROWSER, chromeWins.first)
+        assertEquals("App Usage", chromeWins.second)
+
+        // 3. Heavy download inside Chrome upgrades BROWSER -> DOWNLOAD
+        val heavyDlPkt = AutoProfileAssessment(
+            profile = TrafficProfile.DOWNLOAD,
+            detectedFromPackets = true,
+            concurrentStreaming = false,
+            observedGoodputMbps = 48.0,
+            uidVerified = false,
+        )
+        val chromeDownload = JiterVpnService.resolveEffectiveProfile(null, chromeUsage, heavyDlPkt)
+        assertEquals(TrafficProfile.DOWNLOAD, chromeDownload.first)
+
+        // 4. Without Usage Access, packet assessment still drives GAME cleanly
+        val packetFallback = JiterVpnService.resolveEffectiveProfile(null, noUsage, staleGamePkt)
+        assertEquals(TrafficProfile.GAME, packetFallback.first)
+        assertEquals("Packet UID", packetFallback.second)
+    }
+
+    @Test
+    fun stage62UidFlowClassifierRecognizesBrowsersAndSocialApps() {
+        val chrome = UidFlowClassifier.classifyAppFlow(
+            category = ApplicationInfo.CATEGORY_UNDEFINED,
+            isLegacyGameFlag = false,
+            packages = arrayOf("com.android.chrome"),
+        )
+        assertEquals(TrafficProfile.BROWSER, chrome.appProfile)
+        assertEquals(-1, chrome.qosTier)
+        assertTrue(chrome.uidMatched)
+
+        val whatsapp = UidFlowClassifier.classifyAppFlow(
+            category = ApplicationInfo.CATEGORY_SOCIAL,
+            isLegacyGameFlag = false,
+            packages = arrayOf("com.whatsapp"),
+        )
+        assertEquals(TrafficProfile.SOCIAL, whatsapp.appProfile)
+        assertEquals(-1, whatsapp.qosTier)
+        assertTrue(whatsapp.uidMatched)
     }
 }
