@@ -1,6 +1,7 @@
 #ifndef JITER_MATH_FFI_H
 #define JITER_MATH_FFI_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -93,6 +94,66 @@ uint8_t jiter_engine_step(
     JiterEngineHandle* handle,
     const JiterStepInput* input,
     JiterStepOutput* output
+);
+
+/* Stage 6: Transparent User-Space TCP Stack (smoltcp) */
+typedef struct JiterLocalTcpHandle JiterLocalTcpHandle;
+
+JiterLocalTcpHandle* jiter_local_tcp_create(uint16_t mtu, uint64_t seed);
+void jiter_local_tcp_destroy(JiterLocalTcpHandle* handle);
+
+int32_t jiter_local_tcp_ingest_ipv4(
+    JiterLocalTcpHandle* handle,
+    const uint8_t* pkt,
+    size_t len,
+    uint8_t tier,
+    int64_t now_ms,
+    uint64_t* out_flow_id,
+    uint32_t* out_dst_ipv4_be,
+    uint16_t* out_dst_port
+);
+
+void jiter_local_tcp_poll(JiterLocalTcpHandle* handle, int64_t now_ms);
+
+size_t jiter_local_tcp_pop_tx_packet(
+    JiterLocalTcpHandle* handle,
+    uint8_t* out_buf,
+    size_t max_len
+);
+
+int32_t jiter_local_tcp_recv_from_app(
+    JiterLocalTcpHandle* handle,
+    uint64_t flow_id,
+    uint8_t* out_buf,
+    size_t max_len,
+    int64_t now_ms
+);
+
+int32_t jiter_local_tcp_send_to_app(
+    JiterLocalTcpHandle* handle,
+    uint64_t flow_id,
+    const uint8_t* data,
+    size_t len,
+    int64_t now_ms
+);
+
+int32_t jiter_local_tcp_can_send_to_app(
+    const JiterLocalTcpHandle* handle,
+    uint64_t flow_id
+);
+
+void jiter_local_tcp_close_flow(
+    JiterLocalTcpHandle* handle,
+    uint64_t flow_id,
+    uint8_t abort
+);
+
+void jiter_local_tcp_stats(
+    const JiterLocalTcpHandle* handle,
+    uint32_t* out_active,
+    uint64_t* out_total,
+    uint64_t* out_rx_bytes,
+    uint64_t* out_tx_bytes
 );
 
 #ifdef __cplusplus

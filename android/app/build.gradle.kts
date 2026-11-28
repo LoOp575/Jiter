@@ -11,8 +11,8 @@ android {
         applicationId = "com.jiter.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.6.0-stage5-onetap"
+        versionCode = 5
+        versionName = "0.7.0-stage6-hybrid"
 
         val defaultControlUrl = (project.findProperty("jiterControlPlaneUrl") as String?)
             ?.trim()

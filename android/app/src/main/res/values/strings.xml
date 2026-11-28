@@ -24,6 +24,7 @@
     <string name="main_subtitle_idle">Tap GO — JITER automatically optimizes games &amp; streaming</string>
     <string name="main_subtitle_connecting">Preparing optimal route automatically…</string>
     <string name="main_subtitle_stable_encrypted_fmt">Stable · Encrypted (%1$s)</string>
+    <string name="main_subtitle_stable_shaper">Stable · Smart local shaper active</string>
     <string name="main_subtitle_stable_local">Stable · Adaptive protection active</string>
     <string name="main_subtitle_moderate">Stabilizing latency &amp; jitter…</string>
     <string name="main_subtitle_degraded">Heavy network load — protecting priority traffic</string>

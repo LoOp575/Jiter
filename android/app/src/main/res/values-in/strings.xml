@@ -24,6 +24,7 @@
     <string name="main_subtitle_idle">Tekan GO — JITER otomatis optimalkan game &amp; streaming</string>
     <string name="main_subtitle_connecting">Menyiapkan rute terbaik secara otomatis…</string>
     <string name="main_subtitle_stable_encrypted_fmt">Stabil · Terenkripsi (%1$s)</string>
+    <string name="main_subtitle_stable_shaper">Stabil · Pengatur trafik lokal aktif</string>
     <string name="main_subtitle_stable_local">Stabil · Proteksi adaptif aktif</string>
     <string name="main_subtitle_moderate">Menstabilkan ping &amp; jitter…</string>
     <string name="main_subtitle_degraded">Beban jaringan tinggi — mengamankan paket prioritas</string>

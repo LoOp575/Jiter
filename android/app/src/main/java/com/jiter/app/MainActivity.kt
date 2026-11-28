@@ -288,6 +288,8 @@ class MainActivity : AppCompatActivity() {
                 getString(R.string.main_subtitle_moderate)
             snapshot.relayConnected && snapshot.relayEncrypted ->
                 getString(R.string.main_subtitle_stable_encrypted_fmt, snapshot.relayRegion ?: "EDGE")
+            snapshot.localShaperActive ->
+                getString(R.string.main_subtitle_stable_shaper)
             else ->
                 getString(R.string.main_subtitle_stable_local)
         }
@@ -388,7 +390,8 @@ class MainActivity : AppCompatActivity() {
             appendLine("Latency : SRTT=$rtt | Relay=$relayRtt | Jitter=$jitter")
             appendLine("Link    : Bloat=$bloat | Loss=$loss | Net=${snapshot.networkType}")
             appendLine("Actuator: FEC=${snapshot.fecMode.label} | BG Pacer=$pacerPct% | Route=${snapshot.selectedRoute.label}")
-            appendLine("Tunnel  : AEAD=${snapshot.relayEncrypted} | FullTUN=${snapshot.fullInternetTunnelActive} | IP=${snapshot.assignedTunnelIp ?: "-"}")
+            appendLine("Tunnel  : AEAD=${snapshot.relayEncrypted} | FullTUN=${snapshot.fullInternetTunnelActive} | LocalShaper=${snapshot.localShaperActive}")
+            appendLine("Local   : ActiveFlows=${snapshot.localActiveFlows} | PacedBG=${snapshot.localPacedBytes / 1024} KB | IP=${snapshot.assignedTunnelIp ?: "-"}")
             appendLine("Relay   : Connected=${snapshot.relayConnected} (${snapshot.relayRegion ?: "-"}) | CP=${snapshot.controlPlaneActive}")
             appendLine("Counters: TX=${snapshot.tunTxPackets} | RX=${snapshot.tunRxPackets} | FEC Recov=${snapshot.fecRecoveredPackets}")
             appendLine("Config  : ${cfg.summaryLabel()}")

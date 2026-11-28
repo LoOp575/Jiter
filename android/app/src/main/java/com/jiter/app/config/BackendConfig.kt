@@ -8,8 +8,10 @@ enum class RoutingMode(val label: String) {
 }
 
 enum class TunnelScope(val label: String) {
-    DIAGNOSTIC_SUBNET("Diagnostic Subnet (10.77.0.0/24)"),
+    HYBRID_AUTO("Hybrid Auto (AEAD Relay / Local Shaper)"),
     FULL_INTERNET_TUNNEL("Full Internet Tunnel (0.0.0.0/0 + DNS/IPv6)"),
+    LOCAL_SHAPER_ONLY("Local Traffic Shaper (0.0.0.0/0 No-VPS)"),
+    DIAGNOSTIC_SUBNET("Diagnostic Subnet (10.77.0.0/24)"),
 }
 
 enum class FailurePolicy(val label: String) {
@@ -39,7 +41,7 @@ data class BackendConfig(
     val relayHost: String = DEFAULT_RELAY_HOST,
     val relayPort: Int = DEFAULT_RELAY_PORT,
     val relayPsk: String = DEFAULT_RELAY_PSK,
-    val tunnelScope: TunnelScope = TunnelScope.DIAGNOSTIC_SUBNET,
+    val tunnelScope: TunnelScope = TunnelScope.HYBRID_AUTO,
     val probeHost: String = DEFAULT_PROBE_HOST,
     val probePort: Int = DEFAULT_PROBE_PORT,
     val routingMode: RoutingMode = RoutingMode.HYBRID_ADAPTIVE,
@@ -82,7 +84,14 @@ data class BackendConfig(
             else -> append("Probe: $probeHost:$probePort")
         }
         append(" · ")
-        append(if (tunnelScope == TunnelScope.FULL_INTERNET_TUNNEL) "Full TUN" else "Diag TUN")
+        append(
+            when (tunnelScope) {
+                TunnelScope.HYBRID_AUTO -> "Hybrid TUN"
+                TunnelScope.FULL_INTERNET_TUNNEL -> "Full TUN"
+                TunnelScope.LOCAL_SHAPER_ONLY -> "Local Shaper"
+                TunnelScope.DIAGNOSTIC_SUBNET -> "Diag TUN"
+            },
+        )
     }
 
     companion object {

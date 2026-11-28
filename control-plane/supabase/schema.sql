@@ -17,7 +17,7 @@ create table if not exists public.jiter_relay_nodes (
 
 create table if not exists public.jiter_client_policy (
     id text primary key default 'default',
-    tunnel_scope text not null default 'FULL_INTERNET_TUNNEL',
+    tunnel_scope text not null default 'HYBRID_AUTO',
     routing_mode text not null default 'HYBRID_ADAPTIVE',
     failure_policy text not null default 'FAIL_OPEN',
     fec_policy text not null default 'AUTO_ADAPTIVE',
