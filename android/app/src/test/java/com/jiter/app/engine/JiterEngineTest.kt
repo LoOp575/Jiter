@@ -18,6 +18,7 @@ import com.jiter.app.context.TrafficAutoProfileDetector
 import com.jiter.app.context.UidFlowClassifier
 import com.jiter.app.local.Ipv4PacketCodec
 import com.jiter.app.local.LocalTrafficShaper
+import com.jiter.app.network.NetworkMonitor
 import com.jiter.app.vpn.JiterVpnService
 import com.jiter.app.relay.ControlPlaneClient
 import com.jiter.app.relay.EncryptedHelloAckPayload
@@ -1507,5 +1508,122 @@ class JiterEngineTest {
         assertEquals(TrafficProfile.SOCIAL, whatsapp.appProfile)
         assertEquals(-1, whatsapp.qosTier)
         assertTrue(whatsapp.uidMatched)
+    }
+
+    @Test
+    fun stage63ScorerBandwidthSeparatesLinkCapacityFromIdleDemand() {
+        // 1. OS link capacity unknown + light gaming/browsing/streaming demand -> null (neutral, never fake congestion!)
+        assertNull(JiterVpnService.resolveScorerBandwidthMbps(null, 0.15))
+        assertNull(JiterVpnService.resolveScorerBandwidthMbps(null, 3.0))
+        // 2. Active high-speed transfer proves link capacity when OS capacity is unavailable
+        assertEquals(48.0, requireNotNull(JiterVpnService.resolveScorerBandwidthMbps(null, 48.0)), 1e-6)
+        // 3. Known Wi-Fi/4G link capacity is never pulled down by low idle app usage
+        assertEquals(100.0, requireNotNull(JiterVpnService.resolveScorerBandwidthMbps(100.0, 0.15)), 1e-6)
+        // 4. Faster measured download raises OS estimate upward
+        assertEquals(62.5, requireNotNull(JiterVpnService.resolveScorerBandwidthMbps(25.0, 62.5)), 1e-6)
+
+        // End-to-end verification: healthy 18 ms Wi-Fi stays GREEN across ALL profiles even during light app traffic
+        val bwUnknown = JiterVpnService.resolveScorerBandwidthMbps(null, 0.15)
+        val bwWifi = JiterVpnService.resolveScorerBandwidthMbps(100.0, 0.15)
+        for (profile in TrafficProfile.entries) {
+            val s1 = LinearCostScorer.evaluate(18.0, 2.0, 0.0, 1.0, bwUnknown, profile, 20)
+            val s2 = LinearCostScorer.evaluate(18.0, 2.0, 0.0, 1.0, bwWifi, profile, 20)
+            assertTrue("Expected GREEN score (>=85) for $profile with null bw, got ${s1.scoreQ}", s1.scoreQ >= 85.0)
+            assertTrue("Expected GREEN score (>=85) for $profile with 100 Mbps Wi-Fi, got ${s2.scoreQ}", s2.scoreQ >= 85.0)
+            assertTrue("No false veto expected for $profile", s1.vetoReasons.isEmpty() && s2.vetoReasons.isEmpty())
+        }
+
+        // Genuinely weak 0.8 Mbps cellular link still triggers accurate degradation for GAME / STREAMING
+        val weakBw = JiterVpnService.resolveScorerBandwidthMbps(0.8, 0.2)
+        val weakGame = LinearCostScorer.evaluate(95.0, 18.0, 0.0, 20.0, weakBw, TrafficProfile.GAME, 20)
+        assertTrue("Expected degraded score (<=45) on 0.8 Mbps weak link, got ${weakGame.scoreQ}", weakGame.scoreQ <= 45.0)
+    }
+
+    @Test
+    fun stage63LossWindowResistsSingleProbeBlipButCatchesRealLoss() {
+        assertEquals(0.0, NetworkMonitor.computeWindowLossPct(listOf(true, true, true)), 1e-6)
+        // Single isolated hiccup on probe #2 (or in full 25 window) stays at 4.0% (< 5.0% hard-veto cliff)
+        assertEquals(4.0, NetworkMonitor.computeWindowLossPct(listOf(true, false), 25), 1e-6)
+        val fullWindowOneDrop = List(24) { true } + listOf(false)
+        assertEquals(4.0, NetworkMonitor.computeWindowLossPct(fullWindowOneDrop, 25), 1e-6)
+        // Two genuine drops in 25 -> 8.0% (>= 5.0% hard veto trips immediately!)
+        val fullWindowTwoDrops = List(23) { true } + listOf(false, false)
+        assertEquals(8.0, NetworkMonitor.computeWindowLossPct(fullWindowTwoDrops, 25), 1e-6)
+        // Two consecutive drops at startup -> 100% caught immediately
+        assertEquals(100.0, NetworkMonitor.computeWindowLossPct(listOf(false, false), 25), 1e-6)
+    }
+
+    @Test
+    fun stage63BaselineRecalibrationAdaptsToSteadyRouteShiftWithoutMaskingBloat() {
+        // Calm ISP/4G tower shift: steady 42 ms (min 40 ms over 35 s), jitter 2 ms, 0% loss -> recalibrate
+        assertTrue(
+            JiterVpnService.shouldRecalibrateSteadyBaseline(
+                bloatMs = 18.0,
+                srttMs = 42.0,
+                jitterMs = 2.0,
+                lossPct = 0.0,
+                steadyStreak = 15,
+                windowSpanMs = 35_000L,
+                windowMinRttMs = 40.0,
+            ),
+        )
+        // Active jittery bufferbloat -> MUST NOT recalibrate
+        assertFalse(
+            JiterVpnService.shouldRecalibrateSteadyBaseline(
+                bloatMs = 45.0,
+                srttMs = 70.0,
+                jitterMs = 14.0,
+                lossPct = 0.0,
+                steadyStreak = 0,
+                windowSpanMs = 60_000L,
+                windowMinRttMs = 25.0,
+            ),
+        )
+        // Wide window spread (download bloat just started while earlier probes were 24 ms) -> MUST NOT recalibrate
+        assertFalse(
+            JiterVpnService.shouldRecalibrateSteadyBaseline(
+                bloatMs = 30.0,
+                srttMs = 54.0,
+                jitterMs = 3.0,
+                lossPct = 0.0,
+                steadyStreak = 15,
+                windowSpanMs = 60_000L,
+                windowMinRttMs = 24.0,
+            ),
+        )
+    }
+
+    @Test
+    fun stage63AntiFalseGameIgnoresSystemUidsAndUtilityUdpPorts() {
+        // System daemon UIDs (primary user & work profile) must be rejected
+        assertTrue(UidFlowClassifier.isSystemUid(0))
+        assertTrue(UidFlowClassifier.isSystemUid(1000))
+        assertTrue(UidFlowClassifier.isSystemUid(1051))
+        assertTrue(UidFlowClassifier.isSystemUid(101_000))
+        // Normal user-installed apps (primary user & work profile) must be accepted
+        assertFalse(UidFlowClassifier.isSystemUid(10_123))
+        assertFalse(UidFlowClassifier.isSystemUid(110_123))
+
+        // Sustained mDNS, SSDP, NTP, VoWiFi, and STUN/WebRTC UDP packets must NEVER trigger GAME
+        val detector = TrafficAutoProfileDetector()
+        val utilityPorts = intArrayOf(123, 500, 1900, 3478, 3479, 4500, 5349, 5353, 19302)
+        var nowMs = 1_000L
+        for (port in utilityPorts) {
+            for (i in 0 until 25) {
+                detector.recordPacket(
+                    tier = RelayProtocol.TIER_GAME,
+                    byteLength = 96,
+                    uidMatched = false,
+                    nowMs = nowMs + i * 10L,
+                    protocol = 17,
+                    dstPort = port,
+                    isControlPacket = false,
+                )
+            }
+            nowMs += 300L
+        }
+        val assessed = detector.evaluate(nowMs)
+        assertEquals(TrafficProfile.SAFE_BALANCED, assessed.profile)
+        assertFalse(assessed.detectedFromPackets)
     }
 }

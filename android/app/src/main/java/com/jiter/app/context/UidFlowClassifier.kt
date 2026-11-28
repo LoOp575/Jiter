@@ -10,6 +10,8 @@ import com.jiter.app.engine.TrafficProfile
 import com.jiter.app.relay.RelayProtocol
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 
 /**
  * Combined QoS queue tier + app activity profile resolved from an Android UID.
@@ -105,10 +107,28 @@ class UidFlowClassifier(context: Context) {
             size > 128
     }
 
+    private val inFlightKeys = ConcurrentHashMap.newKeySet<FlowTupleKey>()
+    private val lookupExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "jiter-uid-lookup").apply {
+            isDaemon = true
+            priority = Thread.NORM_PRIORITY - 1
+        }
+    }
+
     fun clearCache() {
         flowCache.clear()
+        inFlightKeys.clear()
         synchronized(uidClassificationCache) {
             uidClassificationCache.clear()
+        }
+    }
+
+    fun shutdown() {
+        clearCache()
+        try {
+            lookupExecutor.shutdownNow()
+        } catch (_: Exception) {
+            // Ignore shutdown error
         }
     }
 
@@ -119,7 +139,11 @@ class UidFlowClassifier(context: Context) {
         classifyFlow(rawPacket, length, SystemClock.elapsedRealtime()).qosTier
 
     /**
-     * Fast 5-tuple cached lookup returning both QoS tier and owning app's `TrafficProfile`.
+     * Non-blocking 5-tuple cached lookup returning both QoS tier and owning app's `TrafficProfile`.
+     *
+     * On cache miss, dispatches the `ConnectivityManager.getConnectionOwnerUid` Binder IPC
+     * asynchronously so the first packet (e.g. TCP SYN / game UDP) leaves TUN with zero added
+     * latency while subsequent packets of the flow immediately hit the warm cache.
      */
     fun classifyFlow(rawPacket: ByteArray, length: Int, nowMs: Long): FlowClassification {
         if (length < 28 || length > rawPacket.size) return FlowClassification.UNKNOWN
@@ -145,25 +169,46 @@ class UidFlowClassifier(context: Context) {
         val tupleKey = FlowTupleKey(proto, srcIpInt, srcPort, dstIpInt, dstPort)
         flowCache.get(tupleKey, nowMs)?.let { return it }
 
-        val resolved = try {
-            val srcIp = InetAddress.getByAddress(rawPacket.copyOfRange(12, 16))
-            val dstIp = InetAddress.getByAddress(rawPacket.copyOfRange(16, 20))
-            val uid = connectivityManager.getConnectionOwnerUid(
-                osProto,
-                InetSocketAddress(srcIp, srcPort),
-                InetSocketAddress(dstIp, dstPort),
-            )
-            if (uid == Process.INVALID_UID || uid <= 0) {
-                FlowClassification.UNKNOWN
-            } else {
-                resolveClassificationForUid(uid)
+        if (inFlightKeys.size < MAX_IN_FLIGHT_LOOKUPS && inFlightKeys.add(tupleKey)) {
+            val srcBytes = rawPacket.copyOfRange(12, 16)
+            val dstBytes = rawPacket.copyOfRange(16, 20)
+            try {
+                lookupExecutor.execute {
+                    try {
+                        val resolved = queryOwnerClassification(osProto, srcBytes, srcPort, dstBytes, dstPort)
+                        flowCache.put(tupleKey, resolved, SystemClock.elapsedRealtime())
+                    } finally {
+                        inFlightKeys.remove(tupleKey)
+                    }
+                }
+            } catch (_: Exception) {
+                inFlightKeys.remove(tupleKey)
             }
-        } catch (_: Exception) {
-            FlowClassification.UNKNOWN
         }
+        return FlowClassification.UNKNOWN
+    }
 
-        flowCache.put(tupleKey, resolved, nowMs)
-        return resolved
+    private fun queryOwnerClassification(
+        osProto: Int,
+        srcBytes: ByteArray,
+        srcPort: Int,
+        dstBytes: ByteArray,
+        dstPort: Int,
+    ): FlowClassification = try {
+        val srcIp = InetAddress.getByAddress(srcBytes)
+        val dstIp = InetAddress.getByAddress(dstBytes)
+        val uid = connectivityManager.getConnectionOwnerUid(
+            osProto,
+            InetSocketAddress(srcIp, srcPort),
+            InetSocketAddress(dstIp, dstPort),
+        )
+        if (uid == Process.INVALID_UID || isSystemUid(uid)) {
+            FlowClassification.UNKNOWN
+        } else {
+            resolveClassificationForUid(uid)
+        }
+    } catch (_: Exception) {
+        FlowClassification.UNKNOWN
     }
 
     @Suppress("DEPRECATION")
@@ -224,6 +269,17 @@ class UidFlowClassifier(context: Context) {
     companion object {
         private const val FLOW_CACHE_MAX_ENTRIES = 512
         private const val FLOW_CACHE_TTL_MS = 30_000L
+        private const val MAX_IN_FLIGHT_LOOKUPS = 64
+        private const val PER_USER_UID_RANGE = 100_000
+        private const val FIRST_APP_UID = 10_000
+
+        /**
+         * Rejects kernel/system daemon UIDs (`root`, `system`, `radio`, `wifi`, `netd`, etc.)
+         * across both primary user and Android work profiles so system traffic is never mislabeled
+         * as a user game or foreground app.
+         */
+        internal fun isSystemUid(uid: Int): Boolean =
+            uid <= 0 || (uid % PER_USER_UID_RANGE) < FIRST_APP_UID
 
         private val GAME_HINTS = listOf(
             "mobile.legends",

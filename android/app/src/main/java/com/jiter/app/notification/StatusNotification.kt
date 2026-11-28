@@ -30,6 +30,8 @@ class StatusNotification(private val context: Context) {
         context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     private var lastPostedElapsedMs: Long = 0L
+    private var lastQualityState: QualityState? = null
+    private var lastSessionState: SessionState? = null
 
     fun ensureChannel() {
         val channel = NotificationChannel(
@@ -131,15 +133,21 @@ class StatusNotification(private val context: Context) {
 
     fun updateIfAllowed(snapshot: SessionSnapshot, force: Boolean = false) {
         val now = SystemClock.elapsedRealtime()
-        if (!force && (now - lastPostedElapsedMs) < MIN_UPDATE_INTERVAL_MS) {
+        val stateChanged = snapshot.qualityState != lastQualityState ||
+            snapshot.sessionState != lastSessionState
+        if (!force && !stateChanged && (now - lastPostedElapsedMs) < MIN_UPDATE_INTERVAL_MS) {
             return
         }
         lastPostedElapsedMs = now
+        lastQualityState = snapshot.qualityState
+        lastSessionState = snapshot.sessionState
         notificationManager.notify(NOTIFICATION_ID, build(snapshot))
     }
 
     fun cancel() {
         lastPostedElapsedMs = 0L
+        lastQualityState = null
+        lastSessionState = null
         notificationManager.cancel(NOTIFICATION_ID)
     }
 
@@ -148,6 +156,6 @@ class StatusNotification(private val context: Context) {
         const val NOTIFICATION_ID = 7701
         private const val REQ_OPEN_APP = 100
         private const val REQ_STOP_SESSION = 101
-        private const val MIN_UPDATE_INTERVAL_MS = 1_000L
+        private const val MIN_UPDATE_INTERVAL_MS = 1_500L
     }
 }
