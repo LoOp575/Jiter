@@ -240,7 +240,7 @@ impl LocalTcpStack {
         socket.set_timeout(Some(Duration::from_secs(45)));
         socket.set_keep_alive(Some(Duration::from_secs(25)));
 
-        let dst_addr = Ipv4Address::from_bytes(&key.dst_ip);
+        let dst_addr = Ipv4Address::from(key.dst_ip);
         if socket.listen(IpEndpoint::new(IpAddress::Ipv4(dst_addr), key.dst_port)).is_err() {
             return IngestOutcome::Ignored;
         }
