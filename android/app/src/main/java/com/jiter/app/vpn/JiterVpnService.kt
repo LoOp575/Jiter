@@ -17,6 +17,8 @@ import com.jiter.app.config.FecPolicy
 import com.jiter.app.config.RoutingMode
 import com.jiter.app.config.TunnelScope
 import com.jiter.app.context.AppContextDetector
+import com.jiter.app.context.AutoProfileAssessment
+import com.jiter.app.context.DetectedContext
 import com.jiter.app.context.TrafficAutoProfileDetector
 import com.jiter.app.context.UidFlowClassifier
 import com.jiter.app.engine.FecMode
@@ -30,6 +32,7 @@ import com.jiter.app.local.LocalTrafficShaper
 import com.jiter.app.network.NetworkMonitor
 import com.jiter.app.notification.StatusNotification
 import com.jiter.app.relay.ControlPlaneClient
+import com.jiter.app.relay.RelayProtocol
 import com.jiter.app.relay.RelayTunnelClient
 import com.jiter.app.state.SessionStore
 import kotlinx.coroutines.CoroutineScope
@@ -135,6 +138,14 @@ class JiterVpnService : VpnService() {
             protectDatagram = { sock -> protect(sock) },
             protectStream = { sock -> protect(sock) },
             onDownlinkPacket = { buf, len -> writeDownlinkPacketToTun(buf, len) },
+            onDownlinkActivity = { tier, bytes, isUdp ->
+                trafficAutoProfileDetector.recordDownlinkBytes(
+                    tier = tier,
+                    byteLength = bytes,
+                    isUdp = isUdp,
+                    nowMs = SystemClock.elapsedRealtime(),
+                )
+            },
         )
     }
 
@@ -148,6 +159,11 @@ class JiterVpnService : VpnService() {
                 val rawName = intent.getStringExtra(EXTRA_PROFILE_NAME)
                 manualProfileOverride = rawName?.let { name ->
                     TrafficProfile.entries.firstOrNull { it.name == name }
+                }
+                if (localShaperActive &&
+                    (manualProfileOverride == null || manualProfileOverride == TrafficProfile.DOWNLOAD)
+                ) {
+                    localShaper.updatePacer(1.0, null)
                 }
                 // Policy-only update: NEVER restarts the tunnel!
                 SessionStore.update { current ->
@@ -250,6 +266,8 @@ class JiterVpnService : VpnService() {
         localTunTxCount.set(0L)
         synchronized(rttHistoryLock) { rttHistoryWindow.clear() }
         trafficAutoProfileDetector.reset()
+        uidFlowClassifier.clearCache()
+        appContextDetector.reset()
         currentFecMode = FecMode.OFF
         currentBgPacerRatio = 1.0
         relayReconnectNeeded.set(cfg.hasCustomRelay())
@@ -375,8 +393,11 @@ class JiterVpnService : VpnService() {
                 cfg.tunnelScope == TunnelScope.LOCAL_SHAPER_ONLY)
 
         if (wantsLocalShaper) {
-            if (LocalTcpNativeBridge.isSupported() && localShaper.start(mtu = tunnelMtu)) {
+            // Mode B has zero UDP/AEAD encapsulation overhead -> full 1500 MTU boosts TCP payload +18%
+            val localMtu = LOCAL_SHAPER_MTU
+            if (LocalTcpNativeBridge.isSupported() && localShaper.start(mtu = localMtu)) {
                 tunMode = ActiveTunMode.LOCAL_SHAPER
+                tunnelMtu = localMtu
                 localShaperActive = true
                 relayReconnectNeeded.set(false)
             } else {
@@ -475,7 +496,7 @@ class JiterVpnService : VpnService() {
                         ActiveTunMode.DIAGNOSTIC -> "JITER Diagnostic Monitor"
                     },
                 )
-                .setMtu(mtu.coerceIn(576, 1400))
+                .setMtu(mtu.coerceIn(576, 1500))
                 .setBlocking(true)
                 .addAddress(localIpv4, 32)
 
@@ -537,23 +558,21 @@ class JiterVpnService : VpnService() {
                     continue
                 }
                 val nowMs = SystemClock.elapsedRealtime()
-                val uidTierOverride = uidFlowClassifier.classifyIpv4Packet(rxBuf, readLen)
-                val uidMatched = uidTierOverride in 0..2
+                val flowClass = uidFlowClassifier.classifyFlow(rxBuf, readLen, nowMs)
+
+                // Record activity directly from the current incoming packet (never on unrelated
+                // dequeued packets) while flagging DNS / ICMP / TCP ACK control frames so they
+                // keep VIP queue priority without false-triggering GAME mode!
+                recordPacketActivity(rxBuf, readLen, flowClass, nowMs)
 
                 synchronized(engineLock) {
                     val adapter = engineAdapter ?: return@synchronized
-                    adapter.enqueueTunPacket(rxBuf, readLen, nowMs, tierOverride = uidTierOverride)
+                    adapter.enqueueTunPacket(rxBuf, readLen, nowMs, tierOverride = flowClass.qosTier)
                     while (adapter.dequeueScheduledPacket(nowMs, txBuf, outTierAndLen)) {
                         val tier = outTierAndLen[0]
                         val pktLen = outTierAndLen[1]
                         if (pktLen > 0) {
                             localTunTxCount.incrementAndGet()
-                            trafficAutoProfileDetector.recordPacket(
-                                tier = tier,
-                                byteLength = pktLen,
-                                uidMatched = uidMatched,
-                                nowMs = nowMs,
-                            )
                             if (localShaperActive) {
                                 localShaper.submitScheduledPacket(txBuf, pktLen, tier)
                             } else if (relayClient.isConnected) {
@@ -572,6 +591,50 @@ class JiterVpnService : VpnService() {
         } catch (_: Exception) {
             // Normal exit when tunInterface is closed on STOP
         }
+    }
+
+    private fun recordPacketActivity(
+        rawIpv4: ByteArray,
+        length: Int,
+        flowClass: com.jiter.app.context.FlowClassification,
+        nowMs: Long,
+    ) {
+        if (length < 20) return
+        val version = (rawIpv4[0].toInt() ushr 4) and 0x0F
+        val ihl = (rawIpv4[0].toInt() and 0x0F) * 4
+        if (version != 4 || ihl < 20 || ihl > length) return
+
+        val proto = rawIpv4[9].toInt() and 0xFF
+        val dstPort = if ((proto == 6 || proto == 17) && ihl + 4 <= length) {
+            ((rawIpv4[ihl + 2].toInt() and 0xFF) shl 8) or (rawIpv4[ihl + 3].toInt() and 0xFF)
+        } else {
+            0
+        }
+        val isControl = proto == 1 ||
+            dstPort == 53 ||
+            dstPort == 853 ||
+            (proto == 6 && length <= 96)
+
+        val inferredTier = when {
+            flowClass.qosTier in 0..2 -> flowClass.qosTier
+            proto == 1 -> RelayProtocol.TIER_GAME
+            proto == 17 && (dstPort == 53 || length <= 320) -> RelayProtocol.TIER_GAME
+            proto == 17 -> RelayProtocol.TIER_STREAMING
+            proto == 6 && length <= 96 -> RelayProtocol.TIER_GAME
+            proto == 6 && (dstPort == 443 || dstPort == 80) -> RelayProtocol.TIER_STREAMING
+            else -> RelayProtocol.TIER_BACKGROUND
+        }
+
+        trafficAutoProfileDetector.recordPacket(
+            tier = inferredTier,
+            byteLength = length,
+            uidMatched = flowClass.uidMatched,
+            nowMs = nowMs,
+            protocol = proto,
+            dstPort = dstPort,
+            uidProfile = flowClass.appProfile,
+            isControlPacket = isControl,
+        )
     }
 
     private fun writeDownlinkPacketToTun(payload: ByteArray, length: Int) {
@@ -594,19 +657,11 @@ class JiterVpnService : VpnService() {
             val packetAssessment = trafficAutoProfileDetector.evaluate(nowElapsedMs)
             val usageDetected = appContextDetector.detect()
 
-            // Zero-Config Auto-Profile Precedence:
-            //   1. Developer manual override (Hidden Developer Console)
-            //   2. Live TUN packet/UID activity (zero Usage Access permission needed!)
-            //   3. Optional UsageStats foreground app detector
-            //   4. Safe Balanced standby
-            val overrideNow = manualProfileOverride
-            val (effectiveProfile, detectionSource) = when {
-                overrideNow != null -> overrideNow to "Manual"
-                packetAssessment.detectedFromPackets -> packetAssessment.profile to "Packet UID"
-                usageDetected.hasUsagePermission && usageDetected.profile != TrafficProfile.SAFE_BALANCED ->
-                    usageDetected.profile to "App Usage"
-                else -> TrafficProfile.SAFE_BALANCED to "Standby"
-            }
+            val (effectiveProfile, detectionSource) = resolveEffectiveProfile(
+                manualOverride = manualProfileOverride,
+                usageDetected = usageDetected,
+                packetAssessment = packetAssessment,
+            )
 
             // Handle dynamic Relay connect / live endpoint or PSK hot-swap when not in Local Shaper mode
             if (!localShaperActive && cfg.hasCustomRelay()) {
@@ -655,6 +710,12 @@ class JiterVpnService : VpnService() {
                     bandwidthMbps = effectiveBandwidthMbps,
                     alternateRoute = relayProbe?.routeMetrics,
                 )
+                if (localShaperActive) {
+                    // In Mode B Local Shaper, LocalTrafficShaper handles smooth 50 ms TCP rwnd
+                    // downlink pacing. Keep the C++ scheduler's outbound queue unthrottled so
+                    // outbound TCP ACKs never stall behind a blocking TUN read().
+                    adapter.configureSchedulerPacer(1.0, effectiveBandwidthMbps ?: 25.0)
+                }
                 Pair(adapter.engineLabel, res)
             } ?: break
 
@@ -847,6 +908,8 @@ class JiterVpnService : VpnService() {
         tunPumpJob = null
         networkMonitor.stopObservingNetwork()
         trafficAutoProfileDetector.reset()
+        uidFlowClassifier.clearCache()
+        appContextDetector.reset()
         synchronized(rttHistoryLock) { rttHistoryWindow.clear() }
 
         localShaper.stop()
@@ -892,5 +955,39 @@ class JiterVpnService : VpnService() {
         const val ACTION_RELOAD_CONFIG = "com.jiter.app.action.RELOAD_CONFIG"
         const val EXTRA_PROFILE_NAME = "extra_profile_name"
         private const val DEFAULT_TUN_IPV4 = "10.77.0.2"
+        private const val LOCAL_SHAPER_MTU = 1500
+
+        /**
+         * Stage 6.2 Auto-Profile Precedence:
+         *   1. Manual pill / Developer override
+         *   2. Foreground app (`UsageStats`) when recognized — immediately follows the app
+         *      actually on screen (`Browser`, `Social`, `Streaming`, `Download`, `Game`) without
+         *      being hijacked by minimized background apps, while upgrading `Browser` -> `Download`
+         *      during sustained in-browser bulk file downloads.
+         *   3. Zero-permission live packet/UID activity fallback (for users without Usage Access
+         *      or unrecognized foreground apps — immune to DNS/TCP-ACK `GAME` false positives).
+         *   4. Safe Balanced standby
+         */
+        internal fun resolveEffectiveProfile(
+            manualOverride: TrafficProfile?,
+            usageDetected: DetectedContext,
+            packetAssessment: AutoProfileAssessment,
+        ): Pair<TrafficProfile, String> = when {
+            manualOverride != null -> manualOverride to "Manual"
+            usageDetected.hasUsagePermission &&
+                usageDetected.profile != TrafficProfile.SAFE_BALANCED -> {
+                if (usageDetected.profile == TrafficProfile.BROWSER &&
+                    packetAssessment.detectedFromPackets &&
+                    packetAssessment.profile == TrafficProfile.DOWNLOAD
+                ) {
+                    TrafficProfile.DOWNLOAD to "Packet UID"
+                } else {
+                    usageDetected.profile to "App Usage"
+                }
+            }
+            packetAssessment.detectedFromPackets ->
+                packetAssessment.profile to "Packet UID"
+            else -> TrafficProfile.SAFE_BALANCED to "Standby"
+        }
     }
 }

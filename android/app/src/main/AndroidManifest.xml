@@ -11,6 +11,19 @@
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
 
+    <!-- Android 11+ Package Visibility so UidFlowClassifier can read ApplicationInfo.category
+         (CATEGORY_GAME / VIDEO / AUDIO / SOCIAL) for installed launchable apps & downloaders
+         without requesting QUERY_ALL_PACKAGES. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <package android:name="com.android.vending" />
+        <package android:name="com.android.providers.downloads" />
+        <package android:name="com.android.providers.downloads.ui" />
+    </queries>
+
     <application
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"

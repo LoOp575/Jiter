@@ -55,6 +55,13 @@ interface EngineAdapter {
         outTierAndLen: IntArray,
     ): Boolean
 
+    /**
+     * Explicitly overrides the C++ TrafficScheduler background pacer ratio (used by Mode B
+     * Local Shaper so outbound TCP ACKs are never stranded on a blocking TUN read while
+     * LocalTrafficShaper handles smooth 50 ms TCP rwnd downlink pacing).
+     */
+    fun configureSchedulerPacer(bgPacerRatio: Double, estimatedLinkMbps: Double) {}
+
     fun close() {}
 }
 
