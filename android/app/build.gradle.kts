@@ -17,7 +17,7 @@ android {
         val defaultControlUrl = (project.findProperty("jiterControlPlaneUrl") as String?)
             ?.trim()
             ?.replace("\"", "")
-            ?: ""
+            ?: "https://jiter-control-plane-two.vercel.app"
         val defaultControlKey = (project.findProperty("jiterControlPlaneAppKey") as String?)
             ?.trim()
             ?.replace("\"", "")
